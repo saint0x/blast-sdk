@@ -1,0 +1,47 @@
+[package]
+name = "blast-cache"
+version = "0.1.0"
+edition = "2021"
+authors = ["Blast Contributors"]
+description = "Caching system for the Blast Python environment manager"
+license = "MIT"
+
+[dependencies]
+# Internal dependencies
+blast-core = { path = "../blast-core" }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = { workspace = true }
+
+# Filesystem
+notify = { workspace = true }
+walkdir = { workspace = true }
+tempfile = { workspace = true }
+
+# Compression
+zstd = "0.13"
+tar = "0.4"
+
+# Hashing
+blake3 = "1.5"
+hex = "0.4"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = { workspace = true }
+proptest = { workspace = true } 

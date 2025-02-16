@@ -1,0 +1,96 @@
+[package]
+name = "blast"
+version = "0.1.0"
+edition = "2021"
+authors = ["Blast Contributors"]
+description = "A high-performance Python environment manager"
+license = "MIT"
+repository = "https://github.com/blast-rs/blast"
+documentation = "https://docs.rs/blast"
+readme = "README.md"
+keywords = ["python", "virtualenv", "package-manager", "dependency-manager"]
+categories = ["development-tools", "command-line-utilities"]
+
+[workspace]
+members = [
+    "crates/blast-core",
+    "crates/blast-resolver",
+    "crates/blast-cache",
+    "crates/blast-daemon",
+    "crates/blast-image",
+    "crates/blast-cli",
+]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+indicatif = "0.17"
+console = "0.15"
+
+# Filesystem
+notify = "6.1"
+walkdir = "2.4"
+tempfile = "3.8"
+
+# Dependency resolution
+pubgrub = "0.2"
+semver = "1.0"
+
+# Memory management
+mimalloc = { version = "0.1", default-features = false }
+
+# Testing
+criterion = "0.5"
+proptest = "1.0"
+mockall = "0.11"
+
+[dependencies]
+blast-core = { path = "crates/blast-core" }
+blast-cache = { path = "crates/blast-cache" }
+blast-resolver = { path = "crates/blast-resolver" }
+blast-daemon = { path = "crates/blast-daemon" }
+blast-image = { path = "crates/blast-image" }
+blast-cli = { path = "crates/blast-cli" }
+
+tokio = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+mockall = { workspace = true }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+debug = false
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.bench]
+lto = true
+codegen-units = 1
+opt-level = 3

@@ -1,0 +1,59 @@
+[package]
+name = "blast-image"
+version = "0.1.0"
+edition = "2021"
+authors = ["Blast Contributors"]
+description = "Image management for the Blast Python environment manager"
+license = "MIT"
+
+[dependencies]
+# Internal dependencies
+blast-core = { path = "../blast-core", features = ["serde"] }
+blast-cache = { path = "../blast-cache" }
+
+# Async runtime
+tokio = { version = "1.0", features = ["fs"] }
+async-trait = { workspace = true }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { workspace = true }
+
+# Compression
+zstd = "0.13"
+tar = "0.4"
+
+# Hashing
+blake3 = "1.5"
+sha2 = "0.10"
+
+# Filesystem
+walkdir = "2.4"
+tempfile = "3.8"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# TOML
+toml = "0.8"
+
+# URL
+url = { version = "2.5", features = ["serde"] }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = "3.8"
+tokio-test = "0.4"
+assert_fs = "1.0"
+
+[features]
+default = []
+gpu = [] 

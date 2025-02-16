@@ -1,0 +1,63 @@
+[package]
+name = "blast-daemon"
+version = "0.1.0"
+edition = "2021"
+authors = ["Blast Contributors"]
+description = "Daemon service for the Blast Python environment manager"
+license = "MIT"
+
+[dependencies]
+# Internal dependencies
+blast-core = { path = "../blast-core" }
+blast-resolver = { path = "../blast-resolver" }
+blast-cache = { path = "../blast-cache" }
+blast-image = { path = "../blast-image" }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+tokio-stream = "0.1"
+async-trait = "0.1"
+
+# File system monitoring
+notify = "6.1"
+walkdir = "2.4.0"
+
+# IPC
+ipc-channel = "0.16"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { workspace = true }
+
+# Transaction support
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Graph algorithms
+petgraph = "0.6"
+sysinfo = "0.33.1"
+
+# Platform-specific dependencies
+[target.'cfg(target_os = "linux")'.dependencies]
+caps = "0.5.5"
+nix = { version = "0.27.1", features = ["sched", "mount"] }
+libseccomp = "0.3.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.48", features = ["Win32_Security_Isolation"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "2.9.2"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.8"
+mockall = { workspace = true }

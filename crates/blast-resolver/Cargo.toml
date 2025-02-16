@@ -1,0 +1,51 @@
+[package]
+name = "blast-resolver"
+version = "0.1.0"
+edition = "2021"
+authors = ["Blast Contributors"]
+description = "Dependency resolver for the Blast Python environment manager"
+license = "MIT"
+
+[dependencies]
+# Internal dependencies
+blast-core = { path = "../blast-core" }
+blast-cache = { path = "../blast-cache" }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# Dependency resolution
+pubgrub = "0.2"
+semver = { workspace = true }
+rustc-hash = "1.1"
+
+# HTTP client for PyPI
+reqwest = { version = "0.11", features = ["json"] }
+url = "2.4"
+
+# Concurrency
+futures = "0.3"
+async-recursion = "1.0"
+futures-util = "0.3"
+
+# Additional dependencies
+dirs = "5.0"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+mockall = { workspace = true }
+wiremock = "0.5"
+tempfile = "3.8"
+tokio-test = "0.4"
