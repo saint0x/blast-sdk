@@ -1,2 +1,0 @@
-- and lets ensure our cli commands use this logic in full -- when we start we should obviously create the toml file and be adding to it as the user pip installs etc and ourt synchronization logic is working, it shoudl always be recording the toml as the source of truth -- and so that when it comes time to save/load, our images will be robust based on the source of truth used to generate it (save logic should use the toml to creat ethe image and load logic should rebuild the nevironemnt from the .blast image which has robust metadata due to the saving logic)
-
