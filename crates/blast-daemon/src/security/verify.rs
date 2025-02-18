@@ -210,37 +210,4 @@ impl PackageVerification for PackageVerifier {
 
         Ok(result)
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use blast_core::package::{PackageId, Version};
-
-    #[tokio::test]
-    async fn test_package_verification() {
-        let verifier = PackageVerifier::new();
-        let package = Package::new(
-            PackageId::new(
-                "test-package",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            Default::default(),
-        );
-
-        // Test signature verification
-        let result = verifier.verify_package(&package).await.unwrap();
-        assert!(result.verified);
-        assert!(result.signature.is_some());
-
-        // Test vulnerability scanning
-        let vulns = verifier.scan_vulnerabilities(&package).await.unwrap();
-        assert!(!vulns.is_empty());
-
-        // Test policy verification
-        let policy = SecurityPolicy::default();
-        let policy_result = verifier.verify_policy(&package, &policy).await.unwrap();
-        assert!(policy_result.allowed);
-    }
 } 

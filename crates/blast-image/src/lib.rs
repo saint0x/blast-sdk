@@ -8,6 +8,8 @@ pub mod hooks;
 pub mod validation;
 pub mod packages;
 pub mod layer;
+pub mod compression;
+pub mod error;
 
 pub use platform::{PlatformInfo, PlatformRequirements, GpuRequirements};
 pub use hooks::{EnvironmentHooks, PathModifications};
@@ -19,38 +21,18 @@ pub use packages::{
     PackageConfig, PackageDependency, PackageIndex, IndexCredentials,
     DependencyTree,
 };
-pub use layer::{Layer, CompressionLevel, LayerMetadata};
+pub use layer::{Layer, LayerType, LayerMetadata};
+pub use compression::{
+    CompressionType, CompressionLevel, CompressionStrategy,
+    compression_ratio, create_strategy,
+};
+pub use error::{Error, Result};
 
 // Re-export manifest types from blast-core
 pub use blast_core::manifest::{
     Manifest, BlastMetadata, SystemDependency, ResourceRequirements,
-    VenvConfig, LayerInfo, LayerType, CompressionType,
+    VenvConfig, LayerInfo,
 };
-
-/// Error type for blast-image operations
-#[derive(Debug, thiserror::Error)]
-pub enum BlastError {
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-    
-    #[error("Serialization error: {0}")]
-    Serialization(String),
-    
-    #[error("Validation error: {0}")]
-    Validation(String),
-    
-    #[error("Platform error: {0}")]
-    Platform(String),
-    
-    #[error("Layer error: {0}")]
-    Layer(String),
-
-    #[error("Package error: {0}")]
-    Package(String),
-}
-
-/// Result type for blast-image operations
-pub type Result<T> = std::result::Result<T, BlastError>;
 
 // Re-export commonly used types
 pub use chrono;
@@ -62,20 +44,16 @@ pub use url;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MIN_COMPATIBLE_VERSION: &str = "0.1.0";
 
+use blast_core::Version;
+
 /// Check if two versions are compatible
 pub fn is_compatible_version(version: &str) -> bool {
-    // TODO: Implement proper version compatibility check
-    version.starts_with("0.1.")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_version_compatibility() {
-        assert!(is_compatible_version("0.1.0"));
-        assert!(is_compatible_version("0.1.1"));
-        assert!(!is_compatible_version("0.2.0"));
+    if let Ok(version) = Version::parse(version) {
+        let version_str = version.to_string();
+        let parts: Vec<&str> = version_str.split('.').collect();
+        parts.get(0).map_or(false, |major| *major == "0") &&
+        parts.get(1).map_or(false, |minor| *minor == "1")
+    } else {
+        false
     }
 } 

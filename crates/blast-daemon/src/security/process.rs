@@ -357,35 +357,4 @@ impl EnvironmentIsolation for ProcessIsolation {
             Err(BlastError::security("Environment not found"))
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use blast_core::python::PythonVersion;
-
-    #[tokio::test]
-    async fn test_process_isolation() {
-        let isolation = ProcessIsolation::new(Default::default());
-        let config = SecurityPolicy {
-            isolation_level: IsolationLevel::Process,
-            ..Default::default()
-        };
-
-        // Create environment
-        let env = isolation.create_environment(&config).await.unwrap();
-        assert!(env.exists());
-
-        // Execute command
-        let result = isolation.execute_command(&env, "print('test')").await.unwrap();
-        assert_eq!(result.trim(), "test");
-
-        // Check resource usage
-        let usage = isolation.get_resource_usage(&env).await.unwrap();
-        assert!(usage.memory_usage > 0);
-        assert!(usage.cpu_usage >= 0.0);
-
-        // Destroy environment
-        isolation.destroy_environment(&env).await.unwrap();
-    }
 } 

@@ -10,6 +10,7 @@ license = "MIT"
 # Internal dependencies
 blast-core = { path = "../blast-core" }
 blast-cache = { path = "../blast-cache" }
+blast-image = { path = "../blast-image" }
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }

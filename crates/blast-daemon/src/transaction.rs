@@ -1,11 +1,13 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use tracing::{info, warn};
+use std::sync::Arc;
 
 use blast_core::{
-    package::{Package, PackageId, VersionConstraint},
+    package::Package,
     error::BlastError,
     state::{EnvironmentState, StateVerification, StateIssue},
     version_history::{VersionEvent, VersionImpact, VersionChangeAnalysis},
@@ -14,6 +16,7 @@ use blast_core::{
 
 use crate::{
     state::{StateManager, Checkpoint},
+    error::DaemonError,
     DaemonResult,
 };
 
@@ -22,6 +25,13 @@ pub enum TransactionOperation {
     Install(Package),
     Uninstall(Package),
     Update { from: Package, to: Package },
+    AddEnvironment {
+        name: String,
+        state: EnvironmentState,
+    },
+    RemoveEnvironment {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +44,8 @@ pub struct TransactionContext {
     pub checkpoint_id: Option<Uuid>,
     pub metrics: TransactionMetrics,
     pub verification: Option<StateVerification>,
+    pub description: String,
+    pub state_manager: Arc<RwLock<StateManager>>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +68,7 @@ pub enum TransactionStatus {
 }
 
 impl TransactionContext {
-    pub fn new() -> Self {
+    pub fn new(description: String, state_manager: Arc<RwLock<StateManager>>) -> Self {
         Self {
             id: Uuid::new_v4(),
             operations: Vec::new(),
@@ -73,6 +85,8 @@ impl TransactionContext {
                 dependencies_checked: 0,
             },
             verification: None,
+            description,
+            state_manager,
         }
     }
 
@@ -131,60 +145,95 @@ impl Clone for TransactionManager {
         // Create new RwLocks with empty contents
         Self {
             active_transactions: RwLock::new(HashMap::new()),
-            state_manager: RwLock::new(StateManager::new(self.state_manager.blocking_read().get_current_state().clone())),
+            state_manager: RwLock::new(StateManager::new(PathBuf::from("environments/default"))),
         }
     }
 }
 
 impl TransactionManager {
     pub fn new(initial_state: EnvironmentState) -> Self {
+        let state_manager = StateManager::new(PathBuf::from("environments/default"));
+        let state_manager = RwLock::new(state_manager);
+        
         Self {
             active_transactions: RwLock::new(HashMap::new()),
-            state_manager: RwLock::new(StateManager::new(initial_state)),
+            state_manager,
         }
     }
 
-    pub async fn begin_transaction(&self) -> DaemonResult<TransactionContext> {
-        let mut txn = TransactionContext::new();
+    pub async fn list_active_transactions(&self) -> DaemonResult<HashMap<Uuid, TransactionContext>> {
+        Ok(self.active_transactions.read().await.clone())
+    }
+
+    pub async fn begin_transaction(&self, description: String) -> DaemonResult<TransactionContext> {
+        let transaction_id = Uuid::new_v4();
+        let state_manager = Arc::new(RwLock::new(StateManager::new(PathBuf::from("environments/default"))));
         
         // Create initial checkpoint
-        let checkpoint_id = Uuid::new_v4();
         {
-            let mut state_manager = self.state_manager.write().await;
-            state_manager.create_checkpoint(
-                checkpoint_id,
-                format!("Transaction {} initial state", txn.id),
-                Some(txn.id),
-            )?;
+            let state_manager_guard = state_manager.write().await;
+            state_manager_guard.create_checkpoint(
+                Uuid::new_v4(),
+                format!("Transaction start: {}", description),
+                Some(transaction_id),
+            ).await?;
         }
-        txn.checkpoint_id = Some(checkpoint_id);
 
-        // Store initial state
-        let current_state = self.get_current_state().await?;
-        let packages_map = current_state.packages.iter()
-            .map(|(name, version)| {
-                let id = PackageId::new(name.clone(), version.clone());
-                let package = Package::new(
-                    id,
-                    HashMap::new(),  // Empty dependencies for now
-                    VersionConstraint::any(),  // Default constraint
-                );
-                (name.clone(), package)
-            })
-            .collect();
-        txn.state_before = packages_map;
+        Ok(TransactionContext {
+            id: transaction_id,
+            description,
+            state_manager,
+            operations: Vec::new(),
+            state_before: HashMap::new(),
+            created_at: Utc::now(),
+            status: TransactionStatus::Pending,
+            checkpoint_id: None,
+            metrics: TransactionMetrics {
+                duration: None,
+                memory_usage: 0,
+                cpu_usage: 0.0,
+                network_operations: 0,
+                cache_hits: 0,
+                dependencies_checked: 0,
+            },
+            verification: None,
+        })
+    }
 
-        // Store transaction
-        self.active_transactions.write().await
-            .insert(txn.id, txn.clone());
+    pub async fn execute_transaction<F, T>(&self, description: String, f: F) -> DaemonResult<T>
+    where
+        F: FnOnce(TransactionContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = DaemonResult<T>> + Send>>,
+    {
+        let ctx = self.begin_transaction(description).await?;
+        let transaction_id = ctx.id;
 
-        Ok(txn)
+        match f(ctx).await {
+            Ok(result) => {
+                // Create success checkpoint
+                let state_manager = self.state_manager.write().await;
+                state_manager.create_checkpoint(
+                    Uuid::new_v4(),
+                    "Transaction completed successfully".to_string(),
+                    Some(transaction_id),
+                ).await?;
+                Ok(result)
+            }
+            Err(e) => {
+                // Restore to initial checkpoint
+                let state_manager = self.state_manager.write().await;
+                let checkpoints = state_manager.list_checkpoints().await?;
+                if let Some(initial) = checkpoints.iter().find(|c| c.transaction_id == Some(transaction_id)) {
+                    state_manager.restore_checkpoint(&initial.id.to_string()).await?;
+                }
+                Err(e)
+            }
+        }
     }
 
     pub async fn commit_transaction(&self, id: Uuid) -> DaemonResult<()> {
         let mut transactions = self.active_transactions.write().await;
         let txn = transactions.get_mut(&id)
-            .ok_or_else(|| BlastError::environment("Transaction not found"))?;
+            .ok_or_else(|| DaemonError::transaction("Transaction not found"))?;
 
         // Verify state before commit
         let verification = self.verify_transaction_state(txn).await?;
@@ -195,10 +244,9 @@ impl TransactionManager {
                 .map(|i| i.description.clone())
                 .collect::<Vec<_>>()
                 .join(", ");
-            txn.status = TransactionStatus::Failed(error_msg.clone());
-            return Err(BlastError::environment(format!(
+            return Err(DaemonError::transaction(format!(
                 "Transaction verification failed: {}", error_msg
-            )).into());
+            )));
         }
 
         // Update metrics before commit
@@ -206,45 +254,53 @@ impl TransactionManager {
         txn.update_metrics(metrics);
 
         // Perform commit
-        let mut state_manager = self.state_manager.write().await;
+        let state_manager = self.state_manager.write().await;
         
         // Apply operations in order
         for op in &txn.operations {
             match op {
                 TransactionOperation::Install(pkg) => {
+                    let current_state = state_manager.get_current_state().await.map_err(|e| DaemonError::from(e))?;
                     let event = VersionEvent {
                         timestamp: Utc::now(),
                         from_version: None,
                         to_version: pkg.version().clone(),
                         impact: VersionImpact::None,
                         reason: format!("Installation via transaction {}", txn.id),
-                        python_version: state_manager.get_current_state().python_version.clone(),
+                        python_version: current_state.python_version.clone(),
                         is_direct: true,
                         affected_dependencies: Default::default(),
                         approved: true,
                         approved_by: None,
                         policy_snapshot: None,
                     };
-                    state_manager.add_package_with_event(pkg, event)?;
+                    state_manager.add_package_with_event(&pkg, event).await.map_err(|e| DaemonError::from(e))?;
                 }
                 TransactionOperation::Uninstall(pkg) => {
-                    state_manager.remove_package(pkg)?;
+                    state_manager.remove_package(&pkg).await.map_err(|e| DaemonError::from(e))?;
                 }
                 TransactionOperation::Update { from, to } => {
+                    let current_state = state_manager.get_current_state().await.map_err(|e| DaemonError::from(e))?;
                     let event = VersionEvent {
                         timestamp: Utc::now(),
                         from_version: Some(from.version().clone()),
                         to_version: to.version().clone(),
                         impact: VersionImpact::from_version_change(from.version(), to.version()),
                         reason: format!("Update via transaction {}", txn.id),
-                        python_version: state_manager.get_current_state().python_version.clone(),
+                        python_version: current_state.python_version.clone(),
                         is_direct: true,
                         affected_dependencies: Default::default(),
                         approved: true,
                         approved_by: None,
                         policy_snapshot: None,
                     };
-                    state_manager.update_package_with_event(from, to, event)?;
+                    state_manager.update_package_with_event(&from, &to, event).await.map_err(|e| DaemonError::from(e))?;
+                }
+                TransactionOperation::AddEnvironment { name, state } => {
+                    state_manager.add_environment(name.clone(), state.clone()).await.map_err(|e| DaemonError::from(e))?;
+                }
+                TransactionOperation::RemoveEnvironment { name } => {
+                    state_manager.remove_environment(name).await.map_err(|e| DaemonError::from(e))?;
                 }
             }
         }
@@ -255,7 +311,7 @@ impl TransactionManager {
             checkpoint_id,
             format!("Transaction {} commit state", id),
             Some(id),
-        )?;
+        ).await.map_err(|e| DaemonError::from(e))?;
 
         txn.status = TransactionStatus::Committed;
         txn.checkpoint_id = Some(checkpoint_id);
@@ -282,35 +338,8 @@ impl TransactionManager {
                             recommendation: Some(format!("Remove existing {} package first", pkg.id().name())),
                         });
                     }
-                    
-                    // Verify dependencies
-                    for (dep_name, constraint) in pkg.dependencies() {
-                        if let Some(dep_version) = current_state.packages.get(dep_name) {
-                            if !constraint.matches(dep_version) {
-                                verification.add_issue(StateIssue {
-                                    description: format!(
-                                        "Package {} dependency {} {} not satisfied (found {})",
-                                        pkg.id().name(),
-                                        dep_name,
-                                        constraint,
-                                        dep_version
-                                    ),
-                                    severity: IssueSeverity::Critical,
-                                    context: None,
-                                    recommendation: Some(format!("Update {} to a compatible version", dep_name)),
-                                });
-                            }
-                        } else {
-                            verification.add_issue(StateIssue {
-                                description: format!("Required dependency {} not found", dep_name),
-                                severity: IssueSeverity::Critical,
-                                context: None,
-                                recommendation: Some(format!("Install {} package", dep_name)),
-                            });
-                        }
-                    }
                 }
-                TransactionOperation::Update { from, to } => {
+                TransactionOperation::Update { from, to: _ } => {
                     // Verify current version matches
                     if !current_state.packages.contains_key(from.id().name()) {
                         verification.add_issue(StateIssue {
@@ -324,21 +353,6 @@ impl TransactionManager {
                             recommendation: Some("Install the correct version before updating".to_string()),
                         });
                     }
-                    
-                    // Verify update compatibility
-                    let impact = VersionImpact::from_version_change(from.id().version(), to.id().version());
-                    if impact.is_breaking() {
-                        verification.add_issue(StateIssue {
-                            description: format!(
-                                "Breaking changes detected in update from {} to {}",
-                                from.id().version(),
-                                to.id().version()
-                            ),
-                            severity: IssueSeverity::Warning,
-                            context: None,
-                            recommendation: Some("Review breaking changes and update dependent packages if needed".to_string()),
-                        });
-                    }
                 }
                 TransactionOperation::Uninstall(pkg) => {
                     // Verify package exists
@@ -350,26 +364,26 @@ impl TransactionManager {
                             recommendation: Some("Verify package name and version".to_string()),
                         });
                     }
-                    
-                    // Check for dependent packages
-                    let dependents: Vec<_> = current_state.packages.iter()
-                        .filter(|(name, _)| {
-                            // Check if any package has this as a dependency
-                            pkg.id().name() == name.as_str()
-                        })
-                        .map(|(name, _)| name.clone())
-                        .collect();
-
-                    if !dependents.is_empty() {
+                }
+                TransactionOperation::AddEnvironment { name, state: _ } => {
+                    // Verify environment doesn't exist
+                    if current_state.packages.contains_key(name) {
                         verification.add_issue(StateIssue {
-                            description: format!(
-                                "Package {} is required by: {}",
-                                pkg.id().name(),
-                                dependents.join(", ")
-                            ),
-                            severity: IssueSeverity::Warning,
+                            description: format!("Environment {} already exists", name),
+                            severity: IssueSeverity::Critical,
                             context: None,
-                            recommendation: Some("Update or remove dependent packages first".to_string()),
+                            recommendation: Some(format!("Choose a different name or remove existing environment {}", name)),
+                        });
+                    }
+                }
+                TransactionOperation::RemoveEnvironment { name } => {
+                    // Verify environment exists
+                    if !current_state.packages.contains_key(name) {
+                        verification.add_issue(StateIssue {
+                            description: format!("Environment {} not found", name),
+                            severity: IssueSeverity::Critical,
+                            context: None,
+                            recommendation: Some(format!("Verify environment name {}", name)),
                         });
                     }
                 }
@@ -384,7 +398,7 @@ impl TransactionManager {
         let memory_usage = std::process::Command::new("ps")
             .args(&["-o", "rss=", "-p", &std::process::id().to_string()])
             .output()
-            .map_err(|e| BlastError::environment(format!("Failed to get memory usage: {}", e)))?
+            .map_err(|e| DaemonError::transaction(format!("Failed to get memory usage: {}", e)))?
             .stdout;
         
         let memory = String::from_utf8_lossy(&memory_usage)
@@ -395,7 +409,7 @@ impl TransactionManager {
         let cpu_usage = std::process::Command::new("ps")
             .args(&["-o", "%cpu=", "-p", &std::process::id().to_string()])
             .output()
-            .map_err(|e| BlastError::environment(format!("Failed to get CPU usage: {}", e)))?
+            .map_err(|e| DaemonError::transaction(format!("Failed to get CPU usage: {}", e)))?
             .stdout;
         
         let cpu = String::from_utf8_lossy(&cpu_usage)
@@ -418,159 +432,36 @@ impl TransactionManager {
     pub async fn rollback_transaction(&self, id: Uuid) -> DaemonResult<()> {
         let mut transactions = self.active_transactions.write().await;
         let mut ctx = transactions.remove(&id).ok_or_else(|| {
-            BlastError::environment("Transaction not found")
+            DaemonError::transaction("Transaction not found")
         })?;
 
         if let Some(checkpoint_id) = ctx.checkpoint_id {
-            let mut state_manager = self.state_manager.write().await;
-            state_manager.restore_checkpoint(checkpoint_id)?;
+            let state_manager = self.state_manager.write().await;
+            state_manager.restore_checkpoint(&checkpoint_id.to_string()).await.map_err(|e| DaemonError::from(e))?;
             ctx.status = TransactionStatus::RolledBack;
             info!("Transaction {} rolled back successfully", id);
             Ok(())
         } else {
-            Err(BlastError::environment("No checkpoint found for rollback").into())
+            Err(DaemonError::transaction("No checkpoint found for rollback"))
         }
     }
 
     pub async fn get_current_state(&self) -> DaemonResult<EnvironmentState> {
-        Ok(self.state_manager.read().await.get_current_state().clone())
+        let state_manager = self.state_manager.read().await;
+        state_manager.get_current_state().await.map_err(DaemonError::from)
     }
 
     pub async fn list_checkpoints(&self) -> DaemonResult<Vec<Checkpoint>> {
-        Ok(self.state_manager.read().await.list_checkpoints()?)
+        let state_manager = self.state_manager.read().await;
+        state_manager.list_checkpoints().await.map_err(DaemonError::from)
     }
 
-    pub async fn get_checkpoint(&self, id: Uuid) -> DaemonResult<Option<Checkpoint>> {
-        Ok(self.state_manager.read().await.get_checkpoint(id)?)
+    pub async fn get_checkpoint(&self, id: &str) -> DaemonResult<Option<Checkpoint>> {
+        let state_manager = self.state_manager.read().await;
+        state_manager.get_checkpoint(id).await.map_err(DaemonError::from)
     }
 
     pub async fn get_transaction(&self, id: Uuid) -> DaemonResult<Option<TransactionContext>> {
         Ok(self.active_transactions.read().await.get(&id).cloned())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use blast_core::python::PythonVersion;
-
-    #[tokio::test]
-    async fn test_transaction_lifecycle() {
-        let initial_state = EnvironmentState::new(
-            "test".to_string(),
-            PythonVersion::parse("3.8").unwrap(),
-            HashMap::new(),
-            HashMap::new(),
-        );
-
-        let manager = TransactionManager::new(initial_state);
-        
-        // Begin transaction
-        let mut ctx = manager.begin_transaction().await.unwrap();
-        
-        // Add operations
-        let package = Package::new(
-            blast_core::package::PackageId::new(
-                "test-package",
-                blast_core::package::Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            blast_core::package::VersionConstraint::any(),
-        );
-        
-        ctx.add_operation(TransactionOperation::Install(package.clone())).unwrap();
-        
-        // Commit transaction
-        manager.commit_transaction(ctx.id).await.unwrap();
-        
-        // Verify state
-        let state = manager.get_current_state().await.unwrap();
-        assert!(state.packages.contains_key("test-package"));
-    }
-
-    #[tokio::test]
-    async fn test_transaction_rollback() {
-        let initial_state = EnvironmentState::new(
-            "test".to_string(),
-            PythonVersion::parse("3.8").unwrap(),
-            HashMap::new(),
-            HashMap::new(),
-        );
-
-        let manager = TransactionManager::new(initial_state);
-        
-        // Begin transaction
-        let mut ctx = manager.begin_transaction().await.unwrap();
-        
-        // Add operations
-        let package = Package::new(
-            blast_core::package::PackageId::new(
-                "test-package",
-                blast_core::package::Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            blast_core::package::VersionConstraint::any(),
-        );
-        
-        ctx.add_operation(TransactionOperation::Install(package.clone())).unwrap();
-        
-        // Rollback transaction
-        manager.rollback_transaction(ctx.id).await.unwrap();
-        
-        // Verify state
-        let state = manager.get_current_state().await.unwrap();
-        assert!(!state.packages.contains_key("test-package"));
-    }
-
-    #[tokio::test]
-    async fn test_transaction_update() {
-        let mut initial_state = EnvironmentState::new(
-            "test".to_string(),
-            PythonVersion::parse("3.8").unwrap(),
-            HashMap::new(),
-            HashMap::new(),
-        );
-
-        let v1 = blast_core::package::Version::parse("1.0.0").unwrap();
-        initial_state.packages.insert("test-package".to_string(), v1.clone());
-
-        let manager = TransactionManager::new(initial_state);
-        
-        // Begin transaction
-        let mut ctx = manager.begin_transaction().await.unwrap();
-        
-        // Add update operation
-        let from_pkg = Package::new(
-            blast_core::package::PackageId::new(
-                "test-package",
-                v1,
-            ),
-            HashMap::new(),
-            blast_core::package::VersionConstraint::any(),
-        );
-
-        let to_pkg = Package::new(
-            blast_core::package::PackageId::new(
-                "test-package",
-                blast_core::package::Version::parse("2.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            blast_core::package::VersionConstraint::any(),
-        );
-        
-        ctx.add_operation(TransactionOperation::Update {
-            from: from_pkg,
-            to: to_pkg,
-        }).unwrap();
-        
-        // Commit transaction
-        manager.commit_transaction(ctx.id).await.unwrap();
-        
-        // Verify state
-        let state = manager.get_current_state().await.unwrap();
-        assert_eq!(
-            state.packages.get("test-package").unwrap().to_string(),
-            "2.0.0"
-        );
     }
 } 

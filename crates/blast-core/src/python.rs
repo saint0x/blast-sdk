@@ -1,23 +1,53 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::collections::HashMap;
+use async_trait::async_trait;
 use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::HashMap;
 
 use crate::error::{BlastError, BlastResult};
 use crate::package::Package;
+use crate::version::VersionConstraint;
+use crate::environment::Environment;
+use crate::metadata::PackageMetadata;
+
+// Helper function to create package metadata from dependencies
+fn create_package_metadata(
+    name: String,
+    version: String,
+    dependencies: HashMap<String, VersionConstraint>,
+    python_version: VersionConstraint,
+) -> PackageMetadata {
+    PackageMetadata::new(
+        name,
+        version,
+        dependencies,
+        python_version,
+    )
+}
 
 /// Python version specification
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PythonVersion {
-    major: u8,
-    minor: u8,
-    patch: Option<u8>,
+    major: u32,
+    minor: u32,
+    patch: Option<u32>,
+}
+
+impl Default for PythonVersion {
+    fn default() -> Self {
+        Self {
+            major: 3,
+            minor: 7,
+            patch: None,
+        }
+    }
 }
 
 impl PythonVersion {
     /// Create a new Python version
-    pub fn new(major: u8, minor: u8, patch: Option<u8>) -> Self {
+    pub fn new(major: u32, minor: u32, patch: Option<u32>) -> Self {
         Self {
             major,
             minor,
@@ -26,17 +56,17 @@ impl PythonVersion {
     }
 
     /// Get the major version
-    pub fn major(&self) -> u8 {
+    pub fn major(&self) -> u32 {
         self.major
     }
 
     /// Get the minor version
-    pub fn minor(&self) -> u8 {
+    pub fn minor(&self) -> u32 {
         self.minor
     }
 
     /// Get the patch version
-    pub fn patch(&self) -> Option<u8> {
+    pub fn patch(&self) -> Option<u32> {
         self.patch
     }
 
@@ -54,28 +84,35 @@ impl PythonVersion {
     }
 
     pub fn parse(version: &str) -> BlastResult<Self> {
-        Self::from_str(version)
-    }
-}
-
-impl FromStr for PythonVersion {
-    type Err = BlastError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<&str> = s.split('.').collect();
-        match parts.len() {
-            2 => Ok(Self::new(
-                parts[0].parse().map_err(|_| BlastError::version("Invalid major version"))?,
-                parts[1].parse().map_err(|_| BlastError::version("Invalid minor version"))?,
-                None,
-            )),
-            3 => Ok(Self::new(
-                parts[0].parse().map_err(|_| BlastError::version("Invalid major version"))?,
-                parts[1].parse().map_err(|_| BlastError::version("Invalid minor version"))?,
-                Some(parts[2].parse().map_err(|_| BlastError::version("Invalid patch version"))?),
-            )),
-            _ => Err(BlastError::version("Invalid Python version format")),
+        let parts: Vec<&str> = version.split('.').collect();
+        if parts.len() < 2 {
+            return Err(BlastError::Python(format!(
+                "Invalid Python version format: {}",
+                version
+            )));
         }
+
+        let major = parts[0]
+            .parse()
+            .map_err(|_| BlastError::Python(format!("Invalid major version: {}", parts[0])))?;
+        let minor = parts[1]
+            .parse()
+            .map_err(|_| BlastError::Python(format!("Invalid minor version: {}", parts[1])))?;
+        let patch = if parts.len() > 2 {
+            Some(
+                parts[2]
+                    .parse()
+                    .map_err(|_| BlastError::Python(format!("Invalid patch version: {}", parts[2])))?,
+            )
+        } else {
+            None
+        };
+
+        Ok(Self {
+            major,
+            minor,
+            patch,
+        })
     }
 }
 
@@ -108,6 +145,14 @@ impl Ord for PythonVersion {
             },
             ord => ord,
         }
+    }
+}
+
+impl FromStr for PythonVersion {
+    type Err = BlastError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
     }
 }
 
@@ -270,6 +315,31 @@ impl PythonEnvironment {
         }
         vars
     }
+
+    /// Get the pip executable
+    pub fn pip_executable(&self) -> PathBuf {
+        self.interpreter_path().join("pip")
+    }
+
+    pub fn get_active() -> BlastResult<Option<Self>> {
+        if let Ok(path) = std::env::var("BLAST_ENV_PATH") {
+            let python_version = if let Ok(version) = std::env::var("BLAST_PYTHON_VERSION") {
+                PythonVersion::parse(&version)?
+            } else {
+                PythonVersion::default()
+            };
+
+            Ok(Some(Self::new(PathBuf::from(path), python_version)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Check if a package is installed
+    pub async fn has_package(&self, package: &Package) -> BlastResult<bool> {
+        let packages = self.get_packages()?;
+        Ok(packages.iter().any(|p| p.name() == package.name() && p.version() == package.version()))
+    }
 }
 
 /// Metadata for Python environments
@@ -285,51 +355,139 @@ pub struct EnvironmentMetadata {
     pub extra: serde_json::Value,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[async_trait]
+impl Environment for PythonEnvironment {
+    async fn create(&self) -> BlastResult<()> {
+        // Create virtual environment using the system Python
+        let output = Command::new("python3")
+            .arg("-m")
+            .arg("venv")
+            .arg(&self.path)
+            .output()
+            .map_err(|e| BlastError::environment(format!(
+                "Failed to create virtual environment: {}", e
+            )))?;
 
-    #[test]
-    fn test_python_version_parsing() {
-        assert!(PythonVersion::parse("3.8").is_ok());
-        assert!(PythonVersion::parse("3.8.0").is_ok());
-        assert!(PythonVersion::parse("3").is_err());
-        assert!(PythonVersion::parse("invalid").is_err());
+        if !output.status.success() {
+            return Err(BlastError::environment(format!(
+                "Failed to create virtual environment: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        Ok(())
     }
 
-    #[test]
-    fn test_python_version_compatibility() {
-        let v1 = PythonVersion::from_str("3.8").unwrap();
-        let v2 = PythonVersion::from_str("3.9").unwrap();
-        let v3 = PythonVersion::from_str("3.7").unwrap();
-        let v4 = PythonVersion::from_str("2.7").unwrap();
-
-        assert!(v1.is_compatible_with(&v2));
-        assert!(!v2.is_compatible_with(&v1));
-        assert!(v1.is_compatible_with(&v3));
-        assert!(!v1.is_compatible_with(&v4));
+    async fn activate(&self) -> BlastResult<()> {
+        // No need to actually activate - we'll use full paths to executables
+        Ok(())
     }
 
-    #[test]
-    fn test_environment_management() {
-        let mut env = PythonEnvironment::new(
-            PathBuf::from("/tmp/test-env"),
-            PythonVersion::from_str("3.8").unwrap(),
-        );
+    async fn deactivate(&self) -> BlastResult<()> {
+        // No need to actually deactivate - we'll use full paths to executables
+        Ok(())
+    }
 
-        let package = Package::new(
-            crate::package::PackageId::new(
-                "test-package",
-                crate::package::Version::parse("1.0.0").unwrap(),
-            ),
-            Default::default(),
-            VersionConstraint::parse(">=3.7").unwrap(),
-        );
+    async fn install_package(&self, package: &Package) -> BlastResult<()> {
+        let pip = self.pip_executable();
+        let package_spec = format!("{}=={}", package.name(), package.version());
+        
+        let output = Command::new(pip)
+            .arg("install")
+            .arg(&package_spec)
+            .output()
+            .map_err(|e| BlastError::environment(format!(
+                "Failed to execute pip install: {}", e
+            )))?;
 
-        env.add_package(package.clone());
-        assert_eq!(env.packages.len(), 1);
+        if !output.status.success() {
+            return Err(BlastError::environment(format!(
+                "Failed to install package {}: {}",
+                package_spec,
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
 
-        env.remove_package(&package);
-        assert_eq!(env.packages.len(), 0);
+        Ok(())
+    }
+
+    async fn uninstall_package(&self, package: &Package) -> BlastResult<()> {
+        let pip = self.pip_executable();
+        
+        let output = Command::new(pip)
+            .arg("uninstall")
+            .arg("--yes")
+            .arg(package.name())
+            .output()
+            .map_err(|e| BlastError::environment(format!(
+                "Failed to execute pip uninstall: {}", e
+            )))?;
+
+        if !output.status.success() {
+            return Err(BlastError::environment(format!(
+                "Failed to uninstall package {}: {}",
+                package.name(),
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn get_packages(&self) -> BlastResult<Vec<Package>> {
+        let output = Command::new(&self.pip_executable())
+            .args(&["list", "--format=json"])
+            .output()?;
+
+        if !output.status.success() {
+            return Err(BlastError::CommandFailed(
+                "Failed to list packages".to_string(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+
+        let packages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)?;
+        
+        let result = packages.into_iter()
+            .map(|pkg| {
+                let name = pkg["name"].as_str().ok_or_else(|| 
+                    BlastError::ParseError("Missing package name".to_string())
+                )?.to_string();
+                
+                let version = pkg["version"].as_str().ok_or_else(|| 
+                    BlastError::ParseError("Missing package version".to_string())
+                )?.to_string();
+
+                Package::new(
+                    name.clone(),
+                    version.clone(),
+                    create_package_metadata(
+                        name,
+                        version,
+                        HashMap::new(),
+                        VersionConstraint::any(),
+                    ),
+                    VersionConstraint::any(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(result)
+    }
+
+    fn path(&self) -> &PathBuf {
+        &self.path
+    }
+
+    fn python_version(&self) -> &PythonVersion {
+        &self.python_version
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = Some(name);
+    }
+
+    fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 } 

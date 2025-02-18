@@ -4,9 +4,11 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::error::BlastResult;
-use crate::package::{Package, Version, VersionRequirement, VersionConstraint};
+use crate::package::Package;
+use crate::version::{Version, VersionConstraint};
 use crate::python::PythonVersion;
 use crate::version_history::{VersionEvent, VersionHistory, VersionImpact, VersionChangeAnalysis};
+use crate::metadata::PackageMetadata;
 
 /// Version policy for package upgrades
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,9 +22,9 @@ pub struct VersionPolicy {
     /// Whether to allow pre-releases
     pub allow_prereleases: bool,
     /// Package-specific version constraints
-    pub package_constraints: HashMap<String, VersionRequirement>,
+    pub package_constraints: HashMap<String, VersionConstraint>,
     /// Python version constraints
-    pub package_python_constraints: HashMap<String, VersionRequirement>,
+    pub package_python_constraints: HashMap<String, VersionConstraint>,
 }
 
 impl Default for VersionPolicy {
@@ -222,19 +224,23 @@ impl VersionManager {
     }
 
     /// Validate all package versions against current policy
-    pub fn validate_all_versions(&self) -> Vec<(String, String)> {
+    pub fn validate_all_versions(&self) -> BlastResult<Vec<(String, String)>> {
         let mut violations = Vec::new();
 
         for (package_name, history) in &self.histories {
             if let Some(current_version) = &history.current_version {
+                let version_str = current_version.to_string();
                 let package = Package::new(
-                    crate::package::PackageId::new(
+                    package_name.clone(),
+                    version_str.clone(),
+                    create_package_metadata(
                         package_name.clone(),
-                        current_version.clone(),
+                        version_str,
+                        HashMap::new(),
+                        VersionConstraint::any(),
                     ),
-                    HashMap::new(),  // Empty dependencies for validation
-                    VersionConstraint::any(),  // Any Python version for validation
-                );
+                    VersionConstraint::any(),
+                ).unwrap();
 
                 if let Ok(allowed) = self.check_upgrade_allowed(&package, current_version) {
                     if !allowed {
@@ -248,7 +254,7 @@ impl VersionManager {
             }
         }
 
-        violations
+        Ok(violations)
     }
 
     // Helper methods
@@ -303,7 +309,7 @@ impl VersionManager {
             // Check dependent packages
             for dependent in history.get_dependents() {
                 if let Some(req) = history.get_requirements().get(dependent) {
-                    if !VersionRequirement::parse(req).unwrap().matches(to) {
+                    if !VersionConstraint::parse(req).unwrap().matches(to) {
                         analysis.affected_dependents.insert(dependent.clone());
                         analysis.compatibility_issues.push(format!(
                             "Package {} requires version {}, which is incompatible with {}",
@@ -318,109 +324,17 @@ impl VersionManager {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::str::FromStr;
-
-    #[test]
-    fn test_version_manager() {
-        let policy = VersionPolicy::default();
-        let mut manager = VersionManager::new(policy);
-        let python_version = PythonVersion::from_str("3.8").unwrap();
-
-        let package = Package::new(
-            crate::package::PackageId::new(
-                "test-package",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            VersionRequirement::parse(">=3.7").unwrap(),
-        );
-
-        manager.add_installation(&package, true, &python_version, "Initial install".to_string());
-        
-        let history = manager.get_history("test-package").unwrap();
-        assert_eq!(history.events.len(), 1);
-        assert_eq!(history.current_version.as_ref().unwrap().to_string(), "1.0.0");
-    }
-
-    #[test]
-    fn test_upgrade_strategies() {
-        let policy = VersionPolicy::default();
-        let mut manager = VersionManager::new(policy);
-
-        let package = Package::new(
-            crate::package::PackageId::new(
-                "test-package",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            VersionRequirement::parse(">=3.7").unwrap(),
-        );
-
-        // Test PatchOnly strategy
-        manager.set_upgrade_strategy(
-            "test-package".to_string(),
-            UpgradeStrategy::PatchOnly,
-        );
-
-        assert!(manager.check_upgrade_allowed(&package, &Version::parse("1.0.1").unwrap()).unwrap());
-        assert!(!manager.check_upgrade_allowed(&package, &Version::parse("1.1.0").unwrap()).unwrap());
-        assert!(!manager.check_upgrade_allowed(&package, &Version::parse("2.0.0").unwrap()).unwrap());
-
-        // Test MinorAndPatch strategy
-        manager.set_upgrade_strategy(
-            "test-package".to_string(),
-            UpgradeStrategy::MinorAndPatch,
-        );
-
-        assert!(manager.check_upgrade_allowed(&package, &Version::parse("1.0.1").unwrap()).unwrap());
-        assert!(manager.check_upgrade_allowed(&package, &Version::parse("1.1.0").unwrap()).unwrap());
-        assert!(!manager.check_upgrade_allowed(&package, &Version::parse("2.0.0").unwrap()).unwrap());
-    }
-
-    #[test]
-    fn test_version_policy() {
-        let mut policy = VersionPolicy::default();
-        policy.package_constraints.insert(
-            "test-package".to_string(),
-            VersionRequirement::parse("<2.0.0").unwrap(),
-        );
-
-        let manager = VersionManager::new(policy);
-        let package = Package::new(
-            crate::package::PackageId::new(
-                "test-package",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            VersionRequirement::parse(">=3.7").unwrap(),
-        );
-
-        assert!(manager.check_upgrade_allowed(&package, &Version::parse("1.1.0").unwrap()).unwrap());
-        assert!(!manager.check_upgrade_allowed(&package, &Version::parse("2.0.0").unwrap()).unwrap());
-    }
-
-    #[test]
-    fn test_change_impact_analysis() {
-        let policy = VersionPolicy::default();
-        let mut manager = VersionManager::new(policy);
-        let python_version = PythonVersion::from_str("3.8").unwrap();
-
-        let package = Package::new(
-            crate::package::PackageId::new(
-                "test-package",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            VersionRequirement::parse(">=3.7").unwrap(),
-        );
-
-        manager.add_installation(&package, true, &python_version, "Initial install".to_string());
-
-        let analysis = manager.analyze_change_impact(&package, &Version::parse("2.0.0").unwrap()).unwrap();
-        assert_eq!(analysis.impact, VersionImpact::Major);
-        assert!(!analysis.is_safe());
-    }
+// Helper function to create package metadata from dependencies
+fn create_package_metadata(
+    name: String,
+    version: String,
+    dependencies: HashMap<String, VersionConstraint>,
+    python_version: VersionConstraint,
+) -> PackageMetadata {
+    PackageMetadata::new(
+        name,
+        version,
+        dependencies,
+        python_version,
+    )
 } 

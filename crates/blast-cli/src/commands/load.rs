@@ -1,11 +1,21 @@
 use std::io::{self, Write};
 use blast_core::{
     config::BlastConfig,
-    error::BlastResult,
+    error::{BlastError, BlastResult},
+    security::SecurityPolicy,
 };
-use blast_daemon::Daemon;
-use blast_image::Image;
+use blast_daemon::{Daemon, DaemonConfig};
+use blast_image::{
+    layer::Layer as Image,
+    error::Error as ImageError,
+    Manifest,
+};
 use tracing::{debug, info, warn};
+
+// Helper function to convert ImageError to BlastError
+fn convert_image_error(err: ImageError) -> BlastError {
+    BlastError::environment(err.to_string())
+}
 
 /// Execute the load command
 pub async fn execute(name: Option<String>, config: &BlastConfig) -> BlastResult<()> {
@@ -17,16 +27,37 @@ pub async fn execute(name: Option<String>, config: &BlastConfig) -> BlastResult<
     }
 
     // Create daemon configuration
-    let daemon_config = blast_daemon::DaemonConfig {
+    let daemon_config = DaemonConfig {
         max_pending_updates: 100,
+        max_snapshot_age_days: 7,
+        env_path: config.project_root.join("environments/default"),
+        cache_path: config.project_root.join("cache"),
     };
 
     // Connect to daemon
     let daemon = Daemon::new(daemon_config).await?;
 
-    // Get list of available images
+    // Get list of available images from the .blast directory
     let blast_dir = config.project_root.join(".blast");
-    let available_images = daemon.list_all_images().await?;
+    let mut available_images = Vec::new();
+    let mut manifests = Vec::new();
+
+    if blast_dir.exists() {
+        for entry in std::fs::read_dir(&blast_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() && path.extension().map_or(false, |ext| ext == "blast") {
+                if let Ok(image) = Image::load(&path, &path).map_err(convert_image_error) {
+                    // Load manifest from the same directory
+                    let manifest_path = path.with_extension("toml");
+                    if let Ok(manifest) = Manifest::load(manifest_path).await {
+                        available_images.push(image);
+                        manifests.push(manifest);
+                    }
+                }
+            }
+        }
+    }
 
     if available_images.is_empty() {
         warn!("No saved images found");
@@ -34,29 +65,31 @@ pub async fn execute(name: Option<String>, config: &BlastConfig) -> BlastResult<
     }
 
     // Determine which image to load
-    let image_name = match name {
+    let (image_idx, image_name) = match name {
         Some(n) => {
             // Verify the specified image exists
-            if !available_images.iter().any(|img| img.name == n) {
+            if let Some((idx, _)) = available_images.iter().enumerate()
+                .find(|(_, img)| img.name == n) {
+                (idx, n)
+            } else {
                 warn!("Image not found: {}", n);
                 return Ok(());
             }
-            n
         }
         None => {
             if available_images.len() == 1 {
                 // Auto-load if only one image exists
-                available_images[0].name.clone()
+                (0, available_images[0].name.clone())
             } else {
                 // Show available images and prompt for selection
                 info!("Available images:");
-                for (i, img) in available_images.iter().enumerate() {
+                for (i, (img, manifest)) in available_images.iter().zip(manifests.iter()).enumerate() {
                     info!(
                         "  {}. {} (created: {}, Python {})",
                         i + 1,
                         img.name,
-                        img.created.format("%Y-%m-%d %H:%M:%S"),
-                        img.python_version
+                        img.metadata.created_at.format("%Y-%m-%d %H:%M:%S"),
+                        manifest.metadata.python_version
                     );
                 }
 
@@ -67,7 +100,7 @@ pub async fn execute(name: Option<String>, config: &BlastConfig) -> BlastResult<
                 
                 match input.trim().parse::<usize>() {
                     Ok(n) if n > 0 && n <= available_images.len() => {
-                        available_images[n - 1].name.clone()
+                        (n - 1, available_images[n - 1].name.clone())
                     }
                     _ => {
                         warn!("Invalid selection");
@@ -78,19 +111,29 @@ pub async fn execute(name: Option<String>, config: &BlastConfig) -> BlastResult<
         }
     };
 
-    let image_path = blast_dir.join(&image_name);
+    let mut image = available_images.into_iter().nth(image_idx).unwrap();
+    let manifest = manifests.into_iter().nth(image_idx).unwrap();
+    
     debug!("Loading image: {}", image_name);
 
-    // Load image
-    let image = Image::load(&image_path)?;
+    // Create environment with image's Python version
+    let policy = SecurityPolicy {
+        python_version: manifest.metadata.python_version.clone(),
+        ..SecurityPolicy::default()
+    };
     
-    // Create environment from image
-    let env = daemon.create_environment_from_image(&image).await?;
+    let env = daemon.create_environment(&policy).await?;
+
+    // Apply image contents to environment
+    image.save(&env.path()).map_err(convert_image_error)?;
+
+    // Activate the environment
+    daemon.activate_environment(&image_name, manifest.metadata.python_version.clone()).await?;
 
     // Set up environment variables
-    std::env::set_var("BLAST_ENV_NAME", env.name().unwrap_or("unnamed"));
+    std::env::set_var("BLAST_ENV_NAME", &image_name);
     std::env::set_var("BLAST_ENV_PATH", env.path().display().to_string());
-    std::env::set_var("BLAST_SOCKET_PATH", format!("/tmp/blast_{}.sock", image_name));
+    std::env::set_var("BLAST_SOCKET_PATH", format!("/tmp/blast_{}.sock", &image_name));
 
     // Set up shell prompt
     if let Ok(shell) = std::env::var("SHELL") {
@@ -101,19 +144,11 @@ pub async fn execute(name: Option<String>, config: &BlastConfig) -> BlastResult<
         }
     }
 
-    // Restore image environment variables
-    for (key, value) in image.metadata().env_vars.iter() {
-        std::env::set_var(key, value);
-    }
-
     info!("Successfully loaded environment image:");
     info!("  Name: {}", image_name);
     info!("  Python: {}", env.python_version());
     info!("  Path: {}", env.path().display());
-    info!("  Created: {}", image.metadata().tags.iter()
-        .find(|t| t.starts_with("created="))
-        .map(|t| t.split('=').nth(1).unwrap_or("unknown"))
-        .unwrap_or("unknown"));
+    info!("  Created: {}", image.metadata.created_at.to_rfc3339());
 
     Ok(())
 } 

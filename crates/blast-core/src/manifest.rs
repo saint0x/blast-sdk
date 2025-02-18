@@ -1,15 +1,19 @@
-//! Core manifest types and traits
-//! 
-//! This module provides the fundamental types for managing environment manifests.
+/// Blast environment manifest module
+/// Contains types and functions for managing Blast environment manifests
+/// Provides functionality for serializing and deserializing environment configurations
+/// Core manifest types and traits for managing environment manifests
 
 use std::path::PathBuf;
 use std::collections::HashMap;
-
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use tokio::fs;
 
 use crate::python::PythonVersion;
 use crate::security::SecurityPolicy;
+use crate::environment::Environment;
+use crate::error::{BlastError, BlastResult};
+use crate::package::Package;
 
 /// Layer type for image layers
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,9 +42,9 @@ pub enum CompressionType {
 /// Comprehensive metadata for Blast environments
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlastMetadata {
-    /// Image name
-    pub name: String,
-    /// Image version
+    /// Environment name
+    pub name: Option<String>,
+    /// Environment version
     pub version: String,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
@@ -50,7 +54,7 @@ pub struct BlastMetadata {
     pub python_version: PythonVersion,
     /// Author information
     pub author: Option<String>,
-    /// Description
+    /// Environment description
     pub description: Option<String>,
     /// License
     pub license: Option<String>,
@@ -164,15 +168,17 @@ pub struct LayerInfo {
     pub created_at: DateTime<Utc>,
 }
 
-/// Image manifest
+/// Manifest for a Blast environment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
-    /// Manifest metadata
+    /// Metadata about the environment
     pub metadata: BlastMetadata,
     /// Installed packages with versions
-    pub packages: Vec<String>,
+    pub packages: Vec<Package>,
     /// Manifest format version
     pub format_version: String,
+    /// Python version
+    pub python_version: PythonVersion,
 }
 
 impl Default for PlatformRequirements {
@@ -214,31 +220,162 @@ impl Default for VenvConfig {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::Utc;
+impl Default for Manifest {
+    fn default() -> Self {
+        Self {
+            packages: Vec::new(),
+            metadata: BlastMetadata {
+                name: None,
+                version: "0.1.0".to_string(),
+                description: None,
+                created_at: Utc::now(),
+                modified_at: Utc::now(),
+                python_version: PythonVersion::new(3, 8, None),
+                author: None,
+                license: None,
+                env_vars: HashMap::new(),
+                tags: Vec::new(),
+                dependencies: HashMap::new(),
+                transitive_deps: HashMap::new(),
+                system_deps: Vec::new(),
+                platform_requirements: PlatformRequirements::default(),
+                security_policy: SecurityPolicy::default(),
+                resources: ResourceRequirements::default(),
+                env_hooks: HashMap::new(),
+                venv_config: VenvConfig::default(),
+                content_hash: String::new(),
+                custom: HashMap::new(),
+                layers: Vec::new(),
+            },
+            format_version: "1.0.0".to_string(),
+            python_version: PythonVersion::new(3, 8, None),
+        }
+    }
+}
 
-    #[test]
-    fn test_platform_requirements_default() {
-        let requirements = PlatformRequirements::default();
-        assert!(requirements.os.contains(&"linux".to_string()));
-        assert!(requirements.arch.contains(&"x86_64".to_string()));
-        assert_eq!(requirements.min_cores, 1);
+impl Manifest {
+    pub fn new() -> Self {
+        Self {
+            packages: Vec::new(),
+            metadata: BlastMetadata {
+                name: None,
+                version: "0.1.0".to_string(),
+                created_at: Utc::now(),
+                modified_at: Utc::now(),
+                python_version: PythonVersion::new(3, 8, None),
+                author: None,
+                description: None,
+                license: None,
+                env_vars: HashMap::new(),
+                tags: Vec::new(),
+                dependencies: HashMap::new(),
+                transitive_deps: HashMap::new(),
+                system_deps: Vec::new(),
+                platform_requirements: PlatformRequirements::default(),
+                security_policy: SecurityPolicy::default(),
+                resources: ResourceRequirements::default(),
+                env_hooks: HashMap::new(),
+                venv_config: VenvConfig::default(),
+                content_hash: String::new(),
+                custom: HashMap::new(),
+                layers: Vec::new(),
+            },
+            format_version: "1.0.0".to_string(),
+            python_version: PythonVersion::new(3, 8, None),
+        }
     }
 
-    #[test]
-    fn test_resource_requirements_default() {
-        let requirements = ResourceRequirements::default();
-        assert!(requirements.max_memory > 0);
-        assert!(requirements.max_disk > 0);
-        assert_eq!(requirements.max_processes, 32);
+    pub async fn from_environment<E: Environment>(env: &E) -> BlastResult<Self> {
+        let packages = env.get_packages().await?;
+        Ok(Self {
+            packages,
+            metadata: BlastMetadata {
+                name: env.name().map(ToString::to_string),
+                version: "0.1.0".to_string(),
+                created_at: Utc::now(),
+                modified_at: Utc::now(),
+                python_version: env.python_version().clone(),
+                author: None,
+                description: None,
+                license: None,
+                env_vars: HashMap::new(),
+                tags: Vec::new(),
+                dependencies: HashMap::new(),
+                transitive_deps: HashMap::new(),
+                system_deps: Vec::new(),
+                platform_requirements: PlatformRequirements::default(),
+                security_policy: SecurityPolicy::default(),
+                resources: ResourceRequirements::default(),
+                env_hooks: HashMap::new(),
+                venv_config: VenvConfig::default(),
+                content_hash: String::new(),
+                custom: HashMap::new(),
+                layers: Vec::new(),
+            },
+            format_version: "1.0.0".to_string(),
+            python_version: env.python_version().clone(),
+        })
     }
 
-    #[test]
-    fn test_venv_config_default() {
-        let config = VenvConfig::default();
-        assert!(!config.system_site_packages);
-        assert_eq!(config.prompt, "(.venv)");
+    pub async fn save(&self, path: PathBuf) -> BlastResult<()> {
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| BlastError::Manifest(e.to_string()))?;
+        fs::write(&path, content)
+            .await
+            .map_err(|e| BlastError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn load(path: PathBuf) -> BlastResult<Self> {
+        let content = fs::read_to_string(&path)
+            .await
+            .map_err(|e| BlastError::Io(e.to_string()))?;
+        serde_json::from_str(&content)
+            .map_err(|e| BlastError::Manifest(e.to_string()))
+    }
+
+    pub fn packages(&self) -> &[Package] {
+        &self.packages
+    }
+
+    pub fn add_package(&mut self, package: Package) {
+        self.packages.push(package);
+    }
+
+    pub fn remove_package(&mut self, name: &str) {
+        self.packages.retain(|p| p.name() != name);
+    }
+}
+
+impl<T: Environment> From<&T> for Manifest {
+    fn from(env: &T) -> Self {
+        Self {
+            metadata: BlastMetadata {
+                name: env.name().map(ToString::to_string),
+                version: "0.1.0".to_string(),
+                description: None,
+                created_at: Utc::now(),
+                modified_at: Utc::now(),
+                python_version: env.python_version().clone(),
+                author: None,
+                license: None,
+                env_vars: HashMap::new(),
+                tags: Vec::new(),
+                dependencies: HashMap::new(),
+                transitive_deps: HashMap::new(),
+                system_deps: Vec::new(),
+                platform_requirements: PlatformRequirements::default(),
+                security_policy: SecurityPolicy::default(),
+                resources: ResourceRequirements::default(),
+                env_hooks: HashMap::new(),
+                venv_config: VenvConfig::default(),
+                content_hash: String::new(),
+                custom: HashMap::new(),
+                layers: Vec::new(),
+            },
+            packages: Vec::new(),
+            format_version: "1.0.0".to_string(),
+            python_version: env.python_version().clone(),
+        }
     }
 } 

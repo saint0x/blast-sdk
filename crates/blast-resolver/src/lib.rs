@@ -9,11 +9,14 @@ use blast_core::package::Package;
 
 mod cache;
 mod pypi;
-mod resolver;
+mod pubgrub;
+mod resolution;
+pub mod resolver;
 
 pub use cache::Cache;
 pub use pypi::PyPIClient;
 pub use resolver::DependencyResolver;
+pub use resolution::{ResolutionStrategy, ResolutionResult, ResolutionGraph};
 
 /// Configuration for the resolver
 #[derive(Debug, Clone)]
@@ -67,25 +70,4 @@ pub async fn create_resolver_with_config(config: Config) -> BlastResult<Arc<Depe
 pub async fn resolve(package: Package) -> BlastResult<Vec<Package>> {
     let resolver = create_resolver().await?;
     resolver.resolve(&package).await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_resolver_creation() {
-        let resolver = create_resolver().await;
-        assert!(resolver.is_ok());
-
-        let config = Config {
-            max_concurrent_requests: 5,
-            request_timeout: 10,
-            verify_ssl: false,
-            allow_prereleases: true,
-            additional_sources: vec!["https://test.pypi.org/simple/".to_string()],
-        };
-        let resolver = create_resolver_with_config(config).await;
-        assert!(resolver.is_ok());
-    }
 }

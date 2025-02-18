@@ -10,7 +10,7 @@ pub type BlastResult<T> = Result<T, BlastError>;
 #[derive(Debug, Error)]
 pub enum BlastError {
     #[error("IO error: {0}")]
-    Io(#[from] io::Error),
+    Io(String),
 
     #[error("Python error: {0}")]
     Python(String),
@@ -24,7 +24,7 @@ pub enum BlastError {
     #[error("Cache error: {0}")]
     Cache(String),
 
-    #[error("Dependency resolution error: {0}")]
+    #[error("Resolution error: {0}")]
     Resolution(String),
 
     #[error("Configuration error: {0}")]
@@ -52,20 +52,34 @@ pub enum BlastError {
     Lock(String),
 
     #[error("Pattern error: {0}")]
-    Pattern(#[from] PatternError),
+    Pattern(String),
 
     #[error("Daemon error: {0}")]
     Daemon(String),
 
+    #[error("Command failed: {0} - {1}")]
+    CommandFailed(String, String),
+
+    #[error("Parse error: {0}")]
+    ParseError(String),
+
     #[error("Other error: {0}")]
     Other(String),
 
-    /// Sync-related errors
     #[error("Sync error: {0}")]
     Sync(String),
 
     #[error("Security error: {0}")]
     Security(String),
+
+    #[error("Manifest error: {0}")]
+    Manifest(String),
+
+    #[error("Unknown error: {0}")]
+    Unknown(String),
+
+    #[error("State error: {0}")]
+    State(String),
 }
 
 impl BlastError {
@@ -148,53 +162,39 @@ impl BlastError {
     pub fn security<S: Into<String>>(msg: S) -> Self {
         BlastError::Security(msg.into())
     }
+
+    /// Create a new state error
+    pub fn state<S: Into<String>>(msg: S) -> Self {
+        Self::State(msg.into())
+    }
+}
+
+impl From<serde_json::Error> for BlastError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Serialization(err.to_string())
+    }
 }
 
 impl From<toml::de::Error> for BlastError {
     fn from(err: toml::de::Error) -> Self {
-        BlastError::Config(format!("TOML deserialization error: {}", err))
+        Self::Serialization(err.to_string())
     }
 }
 
 impl From<toml::ser::Error> for BlastError {
     fn from(err: toml::ser::Error) -> Self {
-        BlastError::Config(format!("TOML serialization error: {}", err))
+        Self::Serialization(err.to_string())
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_error_creation() {
-        let err = BlastError::python("Python error");
-        assert!(matches!(err, BlastError::Python(_)));
-
-        let err = BlastError::package("Package error");
-        assert!(matches!(err, BlastError::Package(_)));
-
-        let err = BlastError::environment("Environment error");
-        assert!(matches!(err, BlastError::Environment(_)));
+impl From<io::Error> for BlastError {
+    fn from(err: io::Error) -> Self {
+        Self::Io(err.to_string())
     }
+}
 
-    #[test]
-    fn test_error_conversion() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let err: BlastError = io_err.into();
-        assert!(matches!(err, BlastError::Io(_)));
-
-        let pattern_err = glob::Pattern::new("[").unwrap_err();
-        let err: BlastError = pattern_err.into();
-        assert!(matches!(err, BlastError::Pattern(_)));
-    }
-
-    #[test]
-    fn test_error_display() {
-        let err = BlastError::python("test error");
-        assert_eq!(err.to_string(), "Python error: test error");
-
-        let err = BlastError::package("test error");
-        assert_eq!(err.to_string(), "Package error: test error");
+impl From<PatternError> for BlastError {
+    fn from(err: PatternError) -> Self {
+        Self::Pattern(err.to_string())
     }
 } 

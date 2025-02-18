@@ -41,6 +41,9 @@ tar = "0.4"
 blake3 = "1.5"
 hex = "0.4"
 
+# Caching
+lru = "0.12"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = { workspace = true }

@@ -1,12 +1,21 @@
 use std::io::{self, Write};
 use blast_core::{
     config::BlastConfig,
-    error::BlastResult,
+    error::{BlastError, BlastResult},
+    python::PythonEnvironment,
 };
-use blast_daemon::Daemon;
-use blast_image::{Image, ImageConfig};
-use chrono::Utc;
+use blast_daemon::{Daemon, DaemonConfig};
+use blast_image::{
+    layer::{Layer as Image, LayerType},
+    compression::{CompressionType, CompressionLevel},
+    error::Error as ImageError,
+};
 use tracing::{debug, info, warn};
+
+// Helper function to convert ImageError to BlastError
+fn convert_image_error(err: ImageError) -> BlastError {
+    BlastError::environment(err.to_string())
+}
 
 /// Execute the save command
 pub async fn execute(name: Option<String>, config: &BlastConfig) -> BlastResult<()> {
@@ -24,15 +33,27 @@ pub async fn execute(name: Option<String>, config: &BlastConfig) -> BlastResult<
         Some(n) => n,
         None => {
             // Check if there's an existing image for this environment
-            let daemon_config = blast_daemon::DaemonConfig {
-                max_pending_updates: 100,
-            };
-            let daemon = Daemon::new(daemon_config).await?;
-            let existing_images = daemon.list_environment_images(&env_name).await?;
+            let blast_dir = config.project_root.join(".blast");
+            let mut existing_name = None;
             
-            if let Some(existing) = existing_images.first() {
+            if blast_dir.exists() {
+                for entry in std::fs::read_dir(&blast_dir)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.is_file() && path.extension().map_or(false, |ext| ext == "blast") {
+                        if let Ok(image) = Image::load(&path, &path).map_err(convert_image_error) {
+                            if image.name == env_name {
+                                existing_name = Some(env_name.clone());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if let Some(name) = existing_name {
                 // If there's an existing image, use its name for updating
-                existing.name.clone()
+                name
             } else {
                 // Prompt for name
                 print!("Enter image name: ");
@@ -53,35 +74,46 @@ pub async fn execute(name: Option<String>, config: &BlastConfig) -> BlastResult<
     }
 
     // Create daemon configuration
-    let daemon_config = blast_daemon::DaemonConfig {
+    let daemon_config = DaemonConfig {
         max_pending_updates: 100,
+        max_snapshot_age_days: 7,
+        env_path: config.project_root.join("environments/default"),
+        cache_path: config.project_root.join("cache"),
     };
 
     // Connect to daemon
     let daemon = Daemon::new(daemon_config).await?;
 
-    // Get active environment
-    if let Some(env) = daemon.get_active_environment().await? {
-        // Create image configuration
-        let image_config = ImageConfig::new()
-            .with_name(&image_name)
-            .with_tag("created", Utc::now().to_rfc3339())
-            .with_tag("python_version", env.python_version().to_string())
-            .with_tag("env_name", env_name.clone());
+    // Get current environment state
+    let state_manager = daemon.state_manager();
+    let state_guard = state_manager.read().await;
+    let current_state = state_guard.get_current_state().await?;
 
-        // Create image from environment
-        let mut image = Image::create_from_environment_with_config(&env, image_config)?;
+    if current_state.is_active() {
+        // Create Python environment instance
+        let env = PythonEnvironment::new(
+            config.project_root.join("environments").join(&env_name),
+            current_state.python_version.clone(),
+        );
+
+        // Create image from environment with options
+        let mut image = Image::from_environment_with_options(
+            &env,
+            LayerType::Packages,
+            CompressionType::Zstd,
+            CompressionLevel::default(),
+        ).map_err(convert_image_error)?;
 
         // Save image
         let image_path = blast_dir.join(&image_name);
-        image.save(&image_path)?;
+        image.save(&image_path).map_err(convert_image_error)?;
 
         info!("Successfully saved environment image:");
         info!("  Name: {}", image_name);
         info!("  Environment: {}", env_name);
         info!("  Python: {}", env.python_version());
         info!("  Compression ratio: {:.2}x", image.compression_ratio());
-        info!("  Total size: {} bytes", image.total_size());
+        info!("  Total size: {} bytes", image.size());
         info!("  Path: {}", image_path.display());
     } else {
         warn!("No active environment found");

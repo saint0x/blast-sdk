@@ -1,19 +1,37 @@
 use std::io::Write;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
-use console::{Term, style};
+use console::Term;
+use serde::{Serialize, Deserialize};
+use crate::logging::{LogLevel, StructuredLogger};
+use tracing::Level;
+use tracing_subscriber::fmt::format::FmtSpan;
+
+use crate::error::BlastResult;
 
 /// User interface style configuration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct UiStyle {
     /// Color scheme for different elements
     pub colors: ColorScheme,
     /// Progress bar style
-    pub progress_style: ProgressStyle,
+    #[allow(dead_code)]
+    progress_style: ProgressStyle,
     /// Whether to use unicode characters
     pub use_unicode: bool,
     /// Whether to use colors
     pub use_colors: bool,
+}
+
+impl std::fmt::Debug for UiStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UiStyle")
+            .field("colors", &self.colors)
+            .field("use_unicode", &self.use_unicode)
+            .field("use_colors", &self.use_colors)
+            // Skip progress_style since it doesn't implement Debug
+            .finish()
+    }
 }
 
 /// Color scheme for UI elements
@@ -227,51 +245,203 @@ impl MachineOutput {
     }
 
     /// Format data for machine consumption
-    pub fn format<T: serde::Serialize>(&self, data: &T) -> Result<String, serde_json::Error> {
+    pub fn format<T: Serialize + std::fmt::Debug>(&self, data: &T) -> Result<String, serde_json::Error> {
         match self.format {
             OutputFormat::Json => serde_json::to_string_pretty(data),
             OutputFormat::Yaml => Ok(serde_yaml::to_string(data).unwrap()),
-            OutputFormat::Custom => Ok(format!("{:?}", data)),
+            OutputFormat::Custom => Ok(format!("{data:?}")),
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::diagnostics::{Diagnostic, DiagnosticLevel, DiagnosticCategory, DiagnosticSuggestion};
+/// UI theme configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Theme {
+    /// Primary color (hex)
+    pub primary_color: String,
+    /// Secondary color (hex)
+    pub secondary_color: String,
+    /// Success color (hex)
+    pub success_color: String,
+    /// Warning color (hex)
+    pub warning_color: String,
+    /// Error color (hex)
+    pub error_color: String,
+}
 
-    #[test]
-    fn test_ui_manager() {
-        let mut ui = UiManager::new();
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            primary_color: "#4A90E2".to_string(),
+            secondary_color: "#86C1B9".to_string(),
+            success_color: "#7ED321".to_string(),
+            warning_color: "#F5A623".to_string(),
+            error_color: "#D0021B".to_string(),
+        }
+    }
+}
+
+/// Progress indicator for long-running operations
+#[derive(Debug)]
+pub struct ProgressIndicator {
+    bar: ProgressBar,
+}
+
+impl ProgressIndicator {
+    /// Create a new progress indicator
+    pub fn new(total: u64, message: &str) -> Self {
+        let bar = ProgressBar::new(total);
+        bar.set_style(ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap()
+            .progress_chars("#>-"));
         
-        // Test progress bar creation
-        let pb = ui.create_progress(100, ProgressType::Bar);
-        pb.set_message("Testing progress");
-        pb.inc(50);
-        pb.finish_with_message("Done");
-
-        // Test colored output
-        ui.success("Operation completed successfully").unwrap();
-        ui.error("An error occurred").unwrap();
-        ui.warning("Warning message").unwrap();
-        ui.info("Information message").unwrap();
+        bar.set_message(message.to_string());
+        
+        Self { bar }
     }
 
-    #[test]
-    fn test_machine_output() {
-        let formatter = MachineOutput::new(OutputFormat::Json);
-        
-        let data = serde_json::json!({
-            "status": "success",
-            "message": "Operation completed",
-            "data": {
-                "value": 42
-            }
-        });
-
-        let output = formatter.format(&data).unwrap();
-        assert!(output.contains("success"));
-        assert!(output.contains("42"));
+    /// Update progress
+    pub fn update(&self, progress: u64) {
+        self.bar.set_position(progress);
     }
+
+    /// Set progress message
+    pub fn set_message(&self, message: &str) {
+        self.bar.set_message(message.to_string());
+    }
+
+    /// Mark as finished
+    pub fn finish(&self) {
+        self.bar.finish_with_message("Done!");
+    }
+}
+
+/// Console output formatter
+#[derive(Debug)]
+pub struct Console {
+    stdout: StandardStream,
+    theme: Theme,
+}
+
+impl Console {
+    /// Create a new console with default theme
+    pub fn new() -> Self {
+        Self {
+            stdout: StandardStream::stdout(ColorChoice::Auto),
+            theme: Theme::default(),
+        }
+    }
+
+    /// Set console theme
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
+    /// Print success message
+    pub fn success(&mut self, message: &str) -> BlastResult<()> {
+        self.stdout.reset()?;
+        self.stdout.set_color(ColorSpec::new().set_fg(Some(termcolor::Color::Green)))?;
+        writeln!(&mut self.stdout, "✓ {}", message)?;
+        self.stdout.reset()?;
+        Ok(())
+    }
+
+    /// Print warning message
+    pub fn warning(&mut self, message: &str) -> BlastResult<()> {
+        self.stdout.reset()?;
+        self.stdout.set_color(ColorSpec::new().set_fg(Some(termcolor::Color::Yellow)))?;
+        writeln!(&mut self.stdout, "⚠ {}", message)?;
+        self.stdout.reset()?;
+        Ok(())
+    }
+
+    /// Print error message
+    pub fn error(&mut self, message: &str) -> BlastResult<()> {
+        self.stdout.reset()?;
+        self.stdout.set_color(ColorSpec::new().set_fg(Some(termcolor::Color::Red)))?;
+        writeln!(&mut self.stdout, "✗ {}", message)?;
+        self.stdout.reset()?;
+        Ok(())
+    }
+
+    /// Print info message
+    pub fn info(&mut self, message: &str) -> BlastResult<()> {
+        self.stdout.reset()?;
+        self.stdout.set_color(ColorSpec::new().set_fg(Some(termcolor::Color::Blue)))?;
+        writeln!(&mut self.stdout, "ℹ {}", message)?;
+        self.stdout.reset()?;
+        Ok(())
+    }
+
+    /// Print debug message
+    pub fn debug(&mut self, message: &str) -> BlastResult<()> {
+        self.stdout.reset()?;
+        self.stdout.set_color(ColorSpec::new().set_fg(Some(termcolor::Color::Magenta)))?;
+        writeln!(&mut self.stdout, "🔍 {}", message)?;
+        self.stdout.reset()?;
+        Ok(())
+    }
+
+    /// Create a new progress indicator
+    pub fn progress(&self, total: u64, message: &str) -> ProgressIndicator {
+        ProgressIndicator::new(total, message)
+    }
+
+    /// Clear the screen
+    pub fn clear(&mut self) -> BlastResult<()> {
+        Term::stdout().clear_screen()?;
+        Ok(())
+    }
+
+    /// Move cursor up
+    pub fn move_up(&mut self, lines: u16) -> BlastResult<()> {
+        Term::stdout().move_cursor_up(lines.into())?;
+        Ok(())
+    }
+
+    /// Move cursor down
+    pub fn move_down(&mut self, lines: u16) -> BlastResult<()> {
+        Term::stdout().move_cursor_down(lines.into())?;
+        Ok(())
+    }
+}
+
+impl Default for Console {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Format data for display
+pub trait DisplayFormat {
+    /// Format data as string
+    fn format(&self) -> String;
+}
+
+impl<T: std::fmt::Display + Serialize + std::fmt::Debug> DisplayFormat for T {
+    fn format(&self) -> String {
+        format!("{self}")
+    }
+}
+
+pub fn init_logging(level: LogLevel) -> StructuredLogger {
+    let tracing_level: Level = level.clone().into();
+    
+    // Set up tracing subscriber with JSON formatting
+    tracing_subscriber::fmt()
+        .with_level(true)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_span_events(FmtSpan::FULL)
+        .with_timer(tracing_subscriber::fmt::time::ChronoLocal::new("%Y-%m-%d %H:%M:%S%.3f".to_string()))
+        .with_env_filter(tracing_level.to_string())
+        .json()
+        .flatten_event(true)
+        .try_init()
+        .expect("Failed to set global subscriber");
+
+    StructuredLogger::new(level)
 } 

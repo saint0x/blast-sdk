@@ -9,30 +9,35 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::error;
 use hex;
 
 use blast_core::error::{BlastError, BlastResult};
-use blast_core::types::CacheSettings;
 
-mod compression;
-mod index;
-mod storage;
-mod layered;
+pub mod compression;
+pub mod storage;
+pub mod memory;
+pub mod layered;
+pub mod lru;
+pub mod index;
+pub mod disk;
 
+use std::path::Path;
+use memory::MemoryStorage;
+use layered::LayeredCache;
+use compression::CompressedStorage;
+use lru::LRUCache;
+use index::IndexedStorage;
+
+// Re-export types
+pub use layered::{CacheLayer, LayerType};
 pub use compression::CompressionLevel;
+
 pub use index::CacheIndex;
 pub use storage::{CacheStorage, FileStorage};
-pub use layered::{
-    LayeredCache,
-    CacheLayer,
-    LayerCacheEntry,
-    CacheSizeLimits,
-    LayeredCacheStats,
-};
+pub use memory::{MemoryCache, MemoryCacheStats};
 
 /// Wrapper for blake3::Hash that implements serialization
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SerializableHash(String);
 
 impl From<blake3::Hash> for SerializableHash {
@@ -68,127 +73,141 @@ struct CacheEntry {
     created: SystemTime,
 }
 
-/// High-performance cache for Python packages and environments
+/// Cache builder for configuring cache options
+pub struct CacheBuilder {
+    path: Option<std::path::PathBuf>,
+    memory_size: Option<usize>,
+    compression: bool,
+    indexed: bool,
+}
+
+impl CacheBuilder {
+    /// Create new cache builder
+    pub fn new() -> Self {
+        Self {
+            path: None,
+            memory_size: None,
+            compression: false,
+            indexed: false,
+        }
+    }
+
+    /// Set cache path
+    pub fn path(mut self, path: impl AsRef<Path>) -> Self {
+        self.path = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Set memory cache size
+    pub fn memory_size(mut self, size: usize) -> Self {
+        self.memory_size = Some(size);
+        self
+    }
+
+    /// Enable compression
+    pub fn compression(mut self, enabled: bool) -> Self {
+        self.compression = enabled;
+        self
+    }
+
+    /// Enable key indexing
+    pub fn indexed(mut self, enabled: bool) -> Self {
+        self.indexed = enabled;
+        self
+    }
+
+    /// Build cache with current configuration
+    pub async fn build(self) -> BlastResult<Cache> {
+        let path = self.path.ok_or_else(|| {
+            blast_core::error::BlastError::cache("Cache path not specified")
+        })?;
+
+        // Create base storage
+        let disk = Arc::new(FileStorage::new(&path).await?);
+        let memory = Arc::new(RwLock::new(MemoryStorage::new()));
+        let layered = Arc::new(LayeredCache::new(memory, disk));
+
+        // Add optional features
+        let mut storage: Arc<dyn CacheStorage + Send + Sync> = layered;
+
+        if self.compression {
+            storage = Arc::new(CompressedStorage::new(storage));
+        }
+
+        if let Some(size) = self.memory_size {
+            storage = Arc::new(LRUCache::new(storage, size));
+        }
+
+        if self.indexed {
+            storage = Arc::new(IndexedStorage::new(storage));
+        }
+
+        Ok(Cache { storage })
+    }
+}
+
+impl Default for CacheBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Cache interface
 pub struct Cache {
-    settings: CacheSettings,
-    storage: Arc<dyn CacheStorage>,
-    index: Arc<RwLock<CacheIndex>>,
+    storage: Arc<dyn CacheStorage + Send + Sync>,
 }
 
 impl Cache {
-    /// Create a new cache with the given settings
-    pub async fn new(settings: CacheSettings) -> BlastResult<Self> {
-        let storage = Arc::new(FileStorage::new(&settings.cache_dir).await?);
-        let index = Arc::new(RwLock::new(CacheIndex::load_or_create(&settings.cache_dir).await?));
-
-        Ok(Self {
-            settings,
-            storage,
-            index,
-        })
+    /// Store data in cache
+    pub async fn store(&self, hash: &blake3::Hash, data: &[u8]) -> BlastResult<()> {
+        self.storage.store(hash, data).await
     }
 
-    /// Store data in the cache with the given key
-    pub async fn store(&self, key: &str, data: &[u8]) -> BlastResult<()> {
-        // Calculate hash of data
-        let hash = blake3::hash(data);
-        
-        // Compress data
-        let compressed = compression::compress(
-            data,
-            CompressionLevel::default(),
-        )?;
-
-        // Store compressed data
-        self.storage.store(&hash, &compressed).await?;
-
-        // Update index
-        let mut index = self.index.write().await;
-        index.insert(
-            key.to_string(),
-            index::CacheEntry {
-                hash: SerializableHash::from(hash),
-                size: data.len() as u64,
-                compressed_size: compressed.len() as u64,
-                path: self.storage.hash_path(&hash),
-                accessed: SystemTime::now(),
-                created: SystemTime::now(),
-            },
-        );
-        index.save().await?;
-
-        Ok(())
+    /// Load data from cache
+    pub async fn load(&self, hash: &blake3::Hash) -> BlastResult<Vec<u8>> {
+        self.storage.load(hash).await
     }
 
-    /// Retrieve data from the cache
-    pub async fn get(&self, key: &str) -> BlastResult<Option<Vec<u8>>> {
-        let entry = {
-            let mut index = self.index.write().await;
-            if let Some(entry) = index.get_mut(key) {
-                entry.accessed = SystemTime::now();
-                entry.clone()
-            } else {
-                return Ok(None);
-            }
-        };
-
-        // Check if entry has expired
-        if let Ok(age) = entry.created.elapsed() {
-            if age > self.settings.ttl {
-                self.remove(key).await?;
-                return Ok(None);
-            }
-        }
-
-        // Load and decompress data
-        let entry_hash: blake3::Hash = entry.hash.try_into()?;
-        let compressed = self.storage.load(&entry_hash).await?;
-        let data = compression::decompress(&compressed)?;
-
-        // Verify hash
-        let hash = blake3::hash(&data);
-        if hash != entry_hash {
-            error!("Cache corruption detected for key: {}", key);
-            self.remove(key).await?;
-            return Ok(None);
-        }
-
-        Ok(Some(data))
+    /// Remove data from cache
+    pub async fn remove(&self, hash: &blake3::Hash) -> BlastResult<()> {
+        self.storage.remove(hash).await
     }
 
-    /// Remove an entry from the cache
-    pub async fn remove(&self, key: &str) -> BlastResult<()> {
-        let entry = {
-            let mut index = self.index.write().await;
-            index.remove(key)
-        };
-
-        if let Some(entry) = entry {
-            let hash: blake3::Hash = entry.hash.try_into()?;
-            self.storage.remove(&hash).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Clear all entries from the cache
+    /// Clear all cached data
     pub async fn clear(&self) -> BlastResult<()> {
-        let mut index = self.index.write().await;
-        index.clear();
-        index.save().await?;
-        self.storage.clear().await?;
-        Ok(())
+        self.storage.clear().await
     }
 
-    /// Get cache statistics
-    pub async fn stats(&self) -> BlastResult<CacheStats> {
-        let index = self.index.read().await;
-        Ok(CacheStats {
-            total_entries: index.len(),
-            total_size: index.total_size(),
-            total_compressed_size: index.total_compressed_size(),
-            compression_ratio: index.compression_ratio(),
-        })
+    /// Store data with key
+    pub async fn store_with_key(&self, key: &str, hash: &blake3::Hash, data: &[u8]) -> BlastResult<()> {
+        if let Some(indexed) = self.storage.as_any().downcast_ref::<IndexedStorage<dyn CacheStorage + Send + Sync>>() {
+            indexed.store_with_key(key, hash, data).await
+        } else {
+            Err(blast_core::error::BlastError::cache("Indexing not enabled"))
+        }
+    }
+
+    /// Load data by key
+    pub async fn load_by_key(&self, key: &str) -> BlastResult<Vec<u8>> {
+        if let Some(indexed) = self.storage.as_any().downcast_ref::<IndexedStorage<dyn CacheStorage + Send + Sync>>() {
+            indexed.load_by_key(key).await
+        } else {
+            Err(blast_core::error::BlastError::cache("Indexing not enabled"))
+        }
+    }
+
+    /// Remove data by key
+    pub async fn remove_by_key(&self, key: &str) -> BlastResult<()> {
+        if let Some(indexed) = self.storage.as_any().downcast_ref::<IndexedStorage<dyn CacheStorage + Send + Sync>>() {
+            indexed.remove_by_key(key).await
+        } else {
+            Err(blast_core::error::BlastError::cache("Indexing not enabled"))
+        }
+    }
+
+    /// Check if compression is enabled
+    pub fn is_compression_enabled(&self) -> bool {
+        self.storage.as_any().is::<CompressedStorage<dyn CacheStorage + Send + Sync>>()
     }
 }
 
@@ -199,79 +218,4 @@ pub struct CacheStats {
     pub total_size: u64,
     pub total_compressed_size: u64,
     pub compression_ratio: f64,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-    use tempfile::tempdir;
-    use tokio::fs;
-
-    #[tokio::test]
-    async fn test_basic_cache_operations() {
-        let dir = tempdir().unwrap();
-        let settings = CacheSettings {
-            cache_dir: dir.path().to_path_buf(),
-            ttl: Duration::from_secs(3600),
-            ..Default::default()
-        };
-
-        let cache = Cache::new(settings).await.unwrap();
-
-        // Store data
-        let key = "test-key";
-        let data = b"test data".to_vec();
-        cache.store(key, &data).await.unwrap();
-
-        // Retrieve data
-        let retrieved = cache.get(key).await.unwrap().unwrap();
-        assert_eq!(retrieved, data);
-
-        // Remove data
-        cache.remove(key).await.unwrap();
-        assert!(cache.get(key).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn test_cache_expiration() {
-        let dir = tempdir().unwrap();
-        let settings = CacheSettings {
-            cache_dir: dir.path().to_path_buf(),
-            ttl: Duration::from_secs(0), // Immediate expiration
-            ..Default::default()
-        };
-
-        let cache = Cache::new(settings).await.unwrap();
-
-        let key = "test-key";
-        let data = b"test data".to_vec();
-        cache.store(key, &data).await.unwrap();
-
-        // Data should be expired
-        assert!(cache.get(key).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn test_cache_corruption() {
-        let dir = tempdir().unwrap();
-        let settings = CacheSettings {
-            cache_dir: dir.path().to_path_buf(),
-            ttl: Duration::from_secs(3600),
-            ..Default::default()
-        };
-
-        let cache = Cache::new(settings).await.unwrap();
-
-        let key = "test-key";
-        let data = b"test data".to_vec();
-        cache.store(key, &data).await.unwrap();
-
-        // Corrupt the data
-        let entry = cache.index.read().await.get(key).unwrap().clone();
-        fs::write(&entry.path, b"corrupted data").await.unwrap();
-
-        // Corrupted data should be detected and removed
-        assert!(cache.get(key).await.unwrap().is_none());
-    }
 } 

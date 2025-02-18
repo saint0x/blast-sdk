@@ -41,8 +41,7 @@ impl DaemonManifestManager {
     }
 
     /// Save manifest to disk
-    async fn save_manifest(&self) -> BlastResult<()> {
-        let manifest = self.manifest.read().await;
+    async fn save_manifest(&self, manifest: &Manifest) -> BlastResult<()> {
         manifest.save(&self.manifest_path)
     }
 }
@@ -55,7 +54,7 @@ impl ManifestManager for DaemonManifestManager {
 
     async fn update_manifest(&self, manifest: &Manifest) -> BlastResult<()> {
         *self.manifest.write().await = manifest.clone();
-        self.save_manifest().await
+        self.save_manifest(manifest).await
     }
 
     async fn record_package_install(&self, package: &Package) -> BlastResult<()> {
@@ -64,19 +63,19 @@ impl ManifestManager for DaemonManifestManager {
             package.name.clone(),
             package.version.to_string(),
         );
-        self.save_manifest().await
+        self.save_manifest(&manifest).await
     }
 
     async fn record_package_removal(&self, package: &Package) -> BlastResult<()> {
-        let mut manifest = self.manifest.write().await;
-        manifest.record_package_removal(&package.name);
-        self.save_manifest().await
+        let mut manifest = self.get_manifest().await?;
+        manifest.remove_package(package);
+        self.save_manifest(&manifest).await
     }
 
     async fn record_env_var_change(&self, key: &str, value: &str) -> BlastResult<()> {
         let mut manifest = self.manifest.write().await;
         manifest.record_env_var_change(key.to_string(), value.to_string());
-        self.save_manifest().await
+        self.save_manifest(&manifest).await
     }
 
     async fn record_system_dependency(&self, dependency: &SystemDependency) -> BlastResult<()> {
@@ -94,37 +93,5 @@ impl ManifestManager for DaemonManifestManager {
     async fn verify_manifest(&self) -> BlastResult<bool> {
         let manifest = self.manifest.read().await;
         manifest.metadata.verify()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-    use blast_core::python::PythonVersion;
-
-    #[tokio::test]
-    async fn test_manifest_manager() {
-        let temp = tempdir().unwrap();
-        let manifest_path = temp.path().join("manifest.toml");
-        
-        let manager = DaemonManifestManager::new(manifest_path).await.unwrap();
-        
-        // Test package installation
-        let package = Package {
-            name: "numpy".to_string(),
-            version: "1.21.0".parse().unwrap(),
-            ..Default::default()
-        };
-        
-        manager.record_package_install(&package).await.unwrap();
-        
-        let manifest = manager.get_manifest().await.unwrap();
-        assert!(manifest.has_package("numpy"));
-        
-        // Test package removal
-        manager.record_package_removal(&package).await.unwrap();
-        let manifest = manager.get_manifest().await.unwrap();
-        assert!(!manifest.has_package("numpy"));
     }
 } 

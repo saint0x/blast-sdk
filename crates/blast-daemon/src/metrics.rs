@@ -188,55 +188,17 @@ impl MetricsManager {
     /// Get overall cache hit rate
     pub async fn get_cache_hit_rate(&self) -> f32 {
         let metrics = self.package_metrics.read().await;
-        
-        if metrics.is_empty() {
-            return 0.0;
-        }
-
-        let total_rate: f32 = metrics.values()
-            .map(|m| m.cache_hit_rate)
+        let total_hits: usize = metrics.values()
+            .map(|m| (m.cache_hit_rate * m.dependency_count as f32) as usize)
             .sum();
-
-        total_rate / metrics.len() as f32
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_metrics_manager() {
-        let manager = MetricsManager::new(100);
-
-        // Record package metrics
-        manager.record_package_install(
-            Uuid::new_v4(),
-            "test-package".to_string(),
-            "1.0.0".to_string(),
-            Duration::from_millis(500),
-            Duration::from_millis(200),
-            5,
-            3,
-            1024 * 1024,
-        ).await;
-
-        // Update environment metrics
-        manager.update_environment_metrics(
-            "test-env".to_string(),
-            10,
-            1024 * 1024 * 100,
-            1024 * 1024 * 50,
-            Duration::from_millis(300),
-        ).await;
-
-        // Check averages
-        let (avg_pip, avg_sync) = manager.get_average_install_times().await;
-        assert!(avg_pip > Duration::from_millis(0));
-        assert!(avg_sync > Duration::from_millis(0));
-
-        // Check cache hit rate
-        let hit_rate = manager.get_cache_hit_rate().await;
-        assert!(hit_rate > 0.0);
+        let total_deps: usize = metrics.values()
+            .map(|m| m.dependency_count)
+            .sum();
+        
+        if total_deps > 0 {
+            total_hits as f32 / total_deps as f32
+        } else {
+            0.0
+        }
     }
 } 

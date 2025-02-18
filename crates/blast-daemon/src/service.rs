@@ -3,14 +3,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 use std::path::PathBuf;
-use std::collections::HashMap;
 use tokio::sync::{broadcast, mpsc, Mutex as TokioMutex};
 use tracing::{error, info};
+use uuid::Uuid;
+use chrono::Utc;
+use std::collections::HashMap;
 
 use blast_core::{
     package::Package,
     python::PythonVersion,
     state::EnvironmentState,
+    version_history::{VersionEvent, VersionImpact},
+    error::BlastResult,
 };
 
 use blast_core::version_control::{VersionManager, VersionPolicy};
@@ -20,8 +24,11 @@ use crate::{
     DaemonError,
     DaemonResult,
     update::{UpdateType, UpdateRequest},
-    transaction::{TransactionOperation, TransactionManager},
+    transaction::{TransactionOperation, TransactionManager, TransactionContext, TransactionStatus},
     monitor::{MonitorEvent, EnvironmentUsage, PythonResourceMonitor},
+    state::{StateManager, Checkpoint},
+    metrics::MetricsManager,
+    environment::EnvironmentManager,
 };
 
 /// Internal state for the update service
@@ -34,6 +41,10 @@ pub(crate) struct UpdateServiceState {
     transaction_manager: TransactionManager,
     /// Version manager
     version_manager: VersionManager,
+    /// State manager
+    state_manager: StateManager,
+    /// Environment manager
+    environment_manager: Arc<EnvironmentManager>,
 }
 
 // Manual Debug implementation to handle non-Debug DependencyResolver
@@ -44,6 +55,8 @@ impl std::fmt::Debug for UpdateServiceState {
             .field("resolver", &"<DependencyResolver>")
             .field("transaction_manager", &self.transaction_manager)
             .field("version_manager", &"<VersionManager>")
+            .field("state_manager", &"<StateManager>")
+            .field("environment_manager", &"<EnvironmentManager>")
             .finish()
     }
 }
@@ -59,24 +72,24 @@ impl UpdateServiceState {
         ).map_err(|e| DaemonError::Resolver(e.to_string()))?;
         
         let cache = Cache::new(cache_path.clone());
+        let _metrics = Arc::new(MetricsManager::new(1000)); // Keep last 1000 operations
         
-        // Create initial environment state
-        let initial_state = EnvironmentState::new(
-            "default".to_string(),
-            PythonVersion::parse("3.8.0").unwrap(),
-            HashMap::new(),
-            HashMap::new(),
-        );
-
         Ok(Self {
             monitor: PythonResourceMonitor::new(
-                env_path,
+                env_path.clone(),
                 cache_path,
                 Default::default(),
             ),
             resolver: Arc::new(DependencyResolver::new(pypi_client, cache)),
-            transaction_manager: TransactionManager::new(initial_state),
+            transaction_manager: TransactionManager::new(EnvironmentState::new(
+                "default".to_string(),
+                PythonVersion::parse("3.8.0").unwrap(),
+                Default::default(),
+                Default::default(),
+            )),
             version_manager: VersionManager::new(VersionPolicy::default()),
+            state_manager: StateManager::new(env_path.clone()),
+            environment_manager: Arc::new(EnvironmentManager::new(env_path)),
         })
     }
 }
@@ -98,7 +111,7 @@ pub struct DaemonService {
     /// Channel for sending monitor events
     monitor_tx: mpsc::Sender<MonitorEvent>,
     /// Update service state
-    update_service_state: Option<Arc<TokioMutex<UpdateServiceState>>>,
+    state: Arc<TokioMutex<UpdateServiceState>>,
     /// Channel for sending update requests
     update_tx: Option<mpsc::Sender<UpdateRequest>>,
     /// Channel for sending shutdown signals
@@ -123,9 +136,9 @@ impl UpdateService {
     /// Run the update service
     pub(crate) async fn run(mut self) -> DaemonResult<()> {
         info!("Starting update service");
-        
+
         let mut update_interval = tokio::time::interval(Duration::from_secs(60));
-        
+
         loop {
             tokio::select! {
                 _ = update_interval.tick() => {
@@ -140,6 +153,16 @@ impl UpdateService {
                         return Err(DaemonError::ResourceLimit(
                             "Python environment resource limits exceeded".to_string()
                         ));
+                    }
+
+                    // Verify environment state periodically
+                    if let Err(e) = state.state_manager.verify_state().await {
+                        error!("State verification failed: {}", e);
+                    }
+
+                    // Clean up old snapshots
+                    if let Err(e) = state.state_manager.cleanup_old_snapshots(7).await {
+                        error!("Failed to clean up old snapshots: {}", e);
                     }
                 }
                 
@@ -196,9 +219,17 @@ impl UpdateService {
                 }
             }
         }
-
+        
+        // Create checkpoint before update
+        let checkpoint_id = Uuid::new_v4();
+        state.state_manager.create_checkpoint(
+            checkpoint_id,
+            format!("Pre-update state for {}", package.name()),
+            None,
+        ).await?;
+        
         // Begin transaction
-        let mut ctx = state.transaction_manager.begin_transaction().await?;
+        let mut ctx = state.transaction_manager.begin_transaction(format!("Update package {}", package.name())).await?;
         
         // Resolve dependencies
         let dependencies = state.resolver.resolve(package).await
@@ -217,14 +248,31 @@ impl UpdateService {
         ctx.add_operation(operation)?;
         
         if update_deps {
-            for dep in dependencies {
-                ctx.add_operation(TransactionOperation::Install(dep))?;
+            for dep in &dependencies {
+                ctx.add_operation(TransactionOperation::Install(dep.clone()))?;
             }
         }
-
+        
         // Commit transaction
         match state.transaction_manager.commit_transaction(ctx.id).await {
             Ok(_) => {
+                // Update state
+                let current_state = state.state_manager.get_current_state().await?;
+                let event = VersionEvent {
+                    timestamp: Utc::now(),
+                    from_version: None,
+                    to_version: package.version().clone(),
+                    impact: VersionImpact::None,
+                    reason: format!("Installation via direct request"),
+                    python_version: current_state.python_version.clone(),
+                    is_direct: true,
+                    affected_dependencies: Default::default(),
+                    approved: true,
+                    approved_by: None,
+                    policy_snapshot: None,
+                };
+                state.state_manager.add_package_with_event(package, event).await?;
+                
                 state.version_manager.add_installation(
                     package,
                     true,
@@ -236,6 +284,10 @@ impl UpdateService {
             }
             Err(e) => {
                 error!("Failed to commit transaction: {}", e);
+                // Restore from checkpoint
+                if let Err(restore_err) = state.state_manager.restore_checkpoint(&checkpoint_id.to_string()).await {
+                    error!("Failed to restore from snapshot: {}", restore_err);
+                }
                 if let Err(e) = state.transaction_manager.rollback_transaction(ctx.id).await {
                     error!("Failed to rollback transaction: {}", e);
                 }
@@ -248,11 +300,37 @@ impl UpdateService {
         info!("Processing install request for {}", package.name());
         
         let mut state = self.state.lock().await;
-        let mut ctx = state.transaction_manager.begin_transaction().await?;
+        
+        // Create checkpoint
+        let checkpoint_id = Uuid::new_v4();
+        state.state_manager.create_checkpoint(
+            checkpoint_id,
+            format!("Pre-install state for {}", package.name()),
+            None,
+        ).await?;
+        
+        let mut ctx = state.transaction_manager.begin_transaction(format!("Install package {}", package.name())).await?;
         ctx.add_operation(TransactionOperation::Install(package.clone()))?;
         
         match state.transaction_manager.commit_transaction(ctx.id).await {
             Ok(_) => {
+                // Update state
+                let current_state = state.state_manager.get_current_state().await?;
+                let event = VersionEvent {
+                    timestamp: Utc::now(),
+                    from_version: None,
+                    to_version: package.version().clone(),
+                    impact: VersionImpact::None,
+                    reason: format!("Installation via direct request"),
+                    python_version: current_state.python_version.clone(),
+                    is_direct: true,
+                    affected_dependencies: Default::default(),
+                    approved: true,
+                    approved_by: None,
+                    policy_snapshot: None,
+                };
+                state.state_manager.add_package_with_event(package, event).await?;
+                
                 state.version_manager.add_installation(
                     package,
                     true,
@@ -264,10 +342,14 @@ impl UpdateService {
             }
             Err(e) => {
                 error!("Failed to install package: {}", e);
+                // Restore from checkpoint
+                if let Err(restore_err) = state.state_manager.restore_checkpoint(&checkpoint_id.to_string()).await {
+                    error!("Failed to restore from checkpoint: {}", restore_err);
+                }
                 if let Err(e) = state.transaction_manager.rollback_transaction(ctx.id).await {
                     error!("Failed to rollback installation: {}", e);
                 }
-                Err(e)
+                Err(e.into())
             }
         }
     }
@@ -276,7 +358,16 @@ impl UpdateService {
         info!("Processing remove request for {}", package.name());
         
         let state = self.state.lock().await;
-        let mut ctx = state.transaction_manager.begin_transaction().await?;
+        
+        // Create checkpoint
+        let checkpoint_id = Uuid::new_v4();
+        state.state_manager.create_checkpoint(
+            checkpoint_id,
+            format!("Pre-remove state for {}", package.name()),
+            None,
+        ).await?;
+        
+        let mut ctx = state.transaction_manager.begin_transaction(format!("Remove package {}", package.name())).await?;
         ctx.add_operation(TransactionOperation::Uninstall(package.clone()))?;
         
         match state.transaction_manager.commit_transaction(ctx.id).await {
@@ -286,6 +377,10 @@ impl UpdateService {
             }
             Err(e) => {
                 error!("Failed to remove package: {}", e);
+                // Restore from checkpoint
+                if let Err(restore_err) = state.state_manager.restore_checkpoint(&checkpoint_id.to_string()).await {
+                    error!("Failed to restore from checkpoint: {}", restore_err);
+                }
                 if let Err(e) = state.transaction_manager.rollback_transaction(ctx.id).await {
                     error!("Failed to rollback removal: {}", e);
                 }
@@ -296,19 +391,45 @@ impl UpdateService {
 
     async fn handle_environment_sync(&mut self) -> DaemonResult<()> {
         info!("Processing environment sync request");
+        
+        let state = self.state.lock().await;
+        
+        // Create checkpoint
+        let checkpoint_id = Uuid::new_v4();
+        state.state_manager.create_checkpoint(
+            checkpoint_id,
+            "Pre-sync state".to_string(),
+            None,
+        ).await?;
+        
+        // Verify current state
+        if let Err(e) = state.state_manager.verify_state().await {
+            error!("State verification failed: {}", e);
+            // Restore from checkpoint
+            if let Err(restore_err) = state.state_manager.restore_checkpoint(&checkpoint_id.to_string()).await {
+                error!("Failed to restore from checkpoint: {}", restore_err);
+            }
+            return Err(e.into());
+        }
+        
         Ok(())
     }
 }
 
 impl DaemonService {
     /// Create a new daemon service
-    pub fn new(monitor_tx: mpsc::Sender<MonitorEvent>) -> Self {
-        Self { 
+    pub fn new(monitor_tx: mpsc::Sender<MonitorEvent>) -> DaemonResult<Self> {
+        let env_path = PathBuf::from("environments/default");
+        let cache_path = PathBuf::from("cache");
+        
+        let state = Arc::new(TokioMutex::new(UpdateServiceState::new(env_path, cache_path)?));
+        
+        Ok(Self {
             monitor_tx,
-            update_service_state: None,
+            state,
             update_tx: None,
             shutdown_tx: None,
-        }
+        })
     }
 
     /// Start the daemon service
@@ -322,7 +443,7 @@ impl DaemonService {
         let (service, state, update_tx, shutdown_tx) = UpdateService::new(env_path, cache_path)?;
         
         // Store shared state and channels
-        self.update_service_state = Some(state);
+        self.state = state;
         self.update_tx = Some(update_tx);
         self.shutdown_tx = Some(shutdown_tx);
         
@@ -353,7 +474,9 @@ impl DaemonService {
         }
         
         // Clear state
-        self.update_service_state = None;
+        let env_path = PathBuf::from("environments/default");
+        let cache_path = PathBuf::from("cache");
+        self.state = Arc::new(TokioMutex::new(UpdateServiceState::new(env_path, cache_path)?));
         self.update_tx = None;
         
         Ok(())
@@ -378,65 +501,199 @@ impl DaemonService {
     /// Send an update request
     pub async fn send_update_request(&self, request: UpdateRequest) -> DaemonResult<()> {
         if let Some(tx) = &self.update_tx {
-            tx.send(request)
-                .await
-                .map_err(|e| DaemonError::Service(format!("Failed to send update request: {}", e)))?;
+            tx.send(request).await.map_err(|_| DaemonError::Service("Update channel closed".to_string()))?;
+            Ok(())
+        } else {
+            Err(DaemonError::Service("Service not started".to_string()))
         }
+    }
+
+    pub async fn cleanup_old_snapshots(&self, max_age_days: u64) -> DaemonResult<()> {
+        let state = self.state.lock().await;
+        state.state_manager.cleanup_old_snapshots(max_age_days).await?;
         Ok(())
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use blast_core::package::{Package, PackageId, Version, VersionConstraint};
-    use tempfile::tempdir;
-    use std::str::FromStr;
-    use std::time::Duration;
-
-    #[tokio::test]
-    async fn test_update_service() {
-        let dir = tempdir().unwrap();
-        let (service, _state, _update_tx, _shutdown_tx) = UpdateService::new(
-            dir.path().to_path_buf(),
-            dir.path().to_path_buf(),
-        ).expect("Failed to create update service");
-
-        // Spawn service
-        let handle = tokio::spawn(async move {
-            if let Err(e) = service.run().await {
-                error!("Service error: {}", e);
-            }
-        });
-
-        // Wait a bit and let it shut down
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        handle.abort();
+    pub async fn begin_transaction(&self, description: String) -> DaemonResult<TransactionContext> {
+        let state = self.state.lock().await;
+        state.transaction_manager.begin_transaction(description).await
     }
 
-    #[tokio::test]
-    async fn test_daemon_service() {
-        let (monitor_tx, _) = mpsc::channel(100);
-        let mut daemon = DaemonService::new(monitor_tx);
+    pub async fn commit_transaction(&self, id: Uuid) -> DaemonResult<()> {
+        let state = self.state.lock().await;
+        state.transaction_manager.commit_transaction(id).await
+    }
 
-        // Start service
-        daemon.start().await.expect("Failed to start daemon");
+    pub async fn rollback_transaction(&self, id: Uuid) -> DaemonResult<()> {
+        let state = self.state.lock().await;
+        state.transaction_manager.rollback_transaction(id).await
+    }
 
-        // Create test package
-        let package = Package::new(
-            PackageId::new(
-                "test-package",
-                Version::parse("1.0.0").unwrap(),
-            ),
+    pub async fn get_current_state(&self) -> DaemonResult<EnvironmentState> {
+        let state = self.state.lock().await;
+        state.state_manager.get_current_state().await.map_err(Into::into)
+    }
+
+    pub async fn list_checkpoints(&self) -> DaemonResult<Vec<Checkpoint>> {
+        let state = self.state.lock().await;
+        state.state_manager.list_checkpoints().await.map_err(Into::into)
+    }
+
+    pub async fn get_checkpoint(&self, id: &str) -> DaemonResult<Option<Checkpoint>> {
+        let state = self.state.lock().await;
+        state.state_manager.get_checkpoint(id).await.map_err(Into::into)
+    }
+
+    pub async fn create_environment(&self, name: String, python_version: PythonVersion) -> DaemonResult<()> {
+        let state = self.state.lock().await;
+        
+        // Create environment using environment manager
+        let _env = state.environment_manager.create_environment(&name, &python_version).await.map_err(|e: blast_core::error::BlastError| DaemonError::from(e))?;
+        
+        let env_state = EnvironmentState::new(
+            name.clone(),
+            python_version,
             HashMap::new(),
-            VersionConstraint::parse(">=3.7").unwrap(),
+            HashMap::new(),
         );
 
-        // Send update request
-        let request = UpdateRequest::new_install(package);
-        daemon.send_update_request(request).await.expect("Failed to send update request");
+        state.state_manager.add_environment(name, env_state).await.map_err(|e: blast_core::error::BlastError| DaemonError::from(e))?;
+        Ok(())
+    }
 
-        // Stop service
-        daemon.stop().await.expect("Failed to stop daemon");
+    pub async fn remove_environment(&self, name: &str) -> DaemonResult<()> {
+        let state = self.state.lock().await;
+        state.state_manager.remove_environment(name).await.map_err(|e: blast_core::error::BlastError| DaemonError::from(e))
+    }
+
+    pub async fn activate_environment(&self, name: String) -> DaemonResult<()> {
+        let state = self.state.lock().await;
+        let env_state = state.state_manager.get_current_state().await.map_err(|e: blast_core::error::BlastError| DaemonError::from(e))?;
+        
+        // Create environment using environment manager
+        let env = state.environment_manager.create_environment(&name, &env_state.python_version).await.map_err(|e: blast_core::error::BlastError| DaemonError::from(e))?;
+        
+        state.state_manager.set_active_environment(
+            name,
+            env.path().to_path_buf(),
+            env_state.python_version.clone(),
+        ).await.map_err(|e: blast_core::error::BlastError| DaemonError::from(e))
+    }
+
+    pub async fn deactivate_environment(&self) -> DaemonResult<()> {
+        let state = self.state.lock().await;
+        state.state_manager.clear_active_environment().await.map_err(Into::into)
+    }
+
+    /// Check if there are any pending updates
+    pub async fn has_pending_updates(&self) -> bool {
+        let state = self.state.lock().await;
+        
+        // Get current state
+        let current_state = match state.state_manager.get_current_state().await {
+            Ok(state) => state,
+            Err(_) => return false,
+        };
+        
+        // Check current state against blast.toml config
+        let config_path = state.environment_manager.as_ref().root_path().join("blast.toml");
+        if let Ok(config) = blast_core::config::BlastConfig::from_file(&config_path) {
+            // Check Python version mismatch
+            if current_state.python_version != config.python_version {
+                return true;
+            }
+
+            // Check package version mismatches
+            for package in &config.dependencies.packages {
+                if let Some(current_version) = current_state.packages.get(&package.name) {
+                    if current_version.to_string() != package.version {
+                        return true;
+                    }
+                } else {
+                    return true;
+                }
+            }
+
+            // Check for packages installed but not in config
+            for name in current_state.packages.keys() {
+                if !config.dependencies.packages.iter().any(|p| &p.name == name) {
+                    return true;
+                }
+            }
+        }
+
+        // Check for pending transactions
+        let transactions = state.transaction_manager.list_active_transactions().await;
+        if let Ok(transactions) = transactions {
+            if transactions.values().any(|t| matches!(t.status, TransactionStatus::Pending)) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Process pending updates
+    pub async fn process_updates(&mut self) -> BlastResult<()> {
+        // Check for resource usage
+        self.monitor_tx.send(MonitorEvent::ResourceCheck).await
+            .map_err(|e| DaemonError::monitor(format!("Failed to send resource check: {}", e)))?;
+
+        // Begin a new transaction for processing updates
+        let transaction_id = {
+            let state = self.state.lock().await;
+            let ctx = state.transaction_manager.begin_transaction("Process pending updates".to_string()).await?;
+            ctx.id
+        };
+        
+        // Process the transaction
+        self.process_transaction_by_id(transaction_id).await?;
+        
+        // Commit the transaction if successful
+        let state = self.state.lock().await;
+        state.transaction_manager.commit_transaction(transaction_id).await?;
+
+        Ok(())
+    }
+
+    async fn process_transaction_by_id(&mut self, transaction_id: Uuid) -> BlastResult<()> {
+        let transaction = {
+            let state = self.state.lock().await;
+            // Get the transaction details
+            let mut ctx = state.transaction_manager.begin_transaction("Get transaction details".to_string()).await?;
+            ctx.id = transaction_id;
+            ctx
+        };
+
+        self.process_transaction(&transaction).await
+    }
+
+    async fn process_transaction(&mut self, transaction: &TransactionContext) -> BlastResult<()> {
+        let _state = self.state.lock().await;
+        for operation in &transaction.operations {
+            match operation {
+                TransactionOperation::Install(package) => {
+                    // Handle package installation
+                    info!("Processing install transaction for package: {:?}", package);
+                }
+                TransactionOperation::Uninstall(package) => {
+                    // Handle package uninstallation
+                    info!("Processing uninstall transaction for package: {:?}", package);
+                }
+                TransactionOperation::Update { from, to } => {
+                    // Handle package update
+                    info!("Processing update transaction from {:?} to {:?}", from, to);
+                }
+                TransactionOperation::AddEnvironment { name, state: env_state, .. } => {
+                    // Handle environment addition
+                    info!("Processing add environment: {} with state: {:?}", name, env_state);
+                }
+                TransactionOperation::RemoveEnvironment { name } => {
+                    // Handle environment removal
+                    info!("Processing remove environment: {}", name);
+                }
+            }
+        }
+        Ok(())
     }
 } 

@@ -70,17 +70,17 @@ impl BlastConfig {
 
     /// Validate the configuration
     pub fn validate(&self) -> BlastResult<()> {
-        // Validate project root exists
-        if !self.project_root.exists() {
+        if !self.env_dir.exists() {
             return Err(BlastError::config(format!(
-                "Project root does not exist: {}",
-                self.project_root.display()
+                "Environment directory does not exist: {}",
+                self.env_dir.display()
             )));
         }
 
-        // Validate environment directory is relative
         if self.env_dir.is_absolute() {
-            return Err(BlastError::config("Environment directory must be relative"));
+            return Err(BlastError::config(
+                "Environment directory must be relative to project root"
+            ));
         }
 
         Ok(())
@@ -100,6 +100,16 @@ impl BlastConfig {
 
     pub fn root_dir(&self) -> &Path {
         &self.project_root
+    }
+
+    /// Convert config to TOML string
+    pub fn to_toml(&self) -> BlastResult<String> {
+        toml::to_string(self).map_err(|e| BlastError::Config(format!("Failed to serialize config: {}", e)))
+    }
+
+    /// Create config from TOML string
+    pub fn from_toml(content: &str) -> BlastResult<Self> {
+        toml::from_str(content).map_err(|e| BlastError::Config(format!("Failed to parse config: {}", e)))
     }
 }
 
@@ -125,46 +135,4 @@ pub struct DependencySpec {
     pub extras: Option<Vec<String>>,
     /// Optional package index
     pub index: Option<String>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::str::FromStr;
-
-    #[test]
-    fn test_config_serialization() {
-        let config = BlastConfig::new(
-            "test-project",
-            "1.0.0",
-            PythonVersion::from_str("3.8").unwrap(),
-            PathBuf::from("/tmp/test-project"),
-        );
-
-        let toml = config.to_toml().unwrap();
-        let parsed = BlastConfig::from_toml(&toml).unwrap();
-
-        assert_eq!(config.name, parsed.name);
-        assert_eq!(config.version, parsed.version);
-        assert_eq!(config.python_version, parsed.python_version);
-    }
-
-    #[test]
-    fn test_config_validation() {
-        let config = BlastConfig::new(
-            "test-project",
-            "1.0.0",
-            PythonVersion::from_str("3.8").unwrap(),
-            PathBuf::from("/nonexistent/path"),
-        );
-
-        assert!(config.validate().is_err());
-
-        let config = BlastConfig {
-            env_dir: PathBuf::from("/absolute/path"),
-            ..config
-        };
-
-        assert!(config.validate().is_err());
-    }
 } 

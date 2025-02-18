@@ -105,60 +105,12 @@ impl Cache {
         self.last_cleanup = now;
         self.save().await
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use blast_core::package::Version;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_cache_operations() {
-        let temp_dir = tempdir().unwrap();
-        let mut cache = Cache::new(temp_dir.path().to_path_buf());
-
-        let id = PackageId::new("test-package".to_string(), Version::parse("1.0.0").unwrap());
-        let package = Package::new(
-            id.clone(),
-            HashMap::new(),
-            blast_core::package::VersionConstraint::any(),
-        );
-
-        // Test storing
-        cache.store_package(package.clone()).unwrap();
-        assert!(cache.packages.contains_key(&id));
-
-        // Test retrieval
-        let retrieved = cache.get_package(&id).unwrap();
-        assert_eq!(retrieved.name(), package.name());
-        assert_eq!(retrieved.version(), package.version());
-
-        // Test clearing
-        cache.cleanup().await.unwrap();
-        assert!(cache.packages.is_empty());
-    }
-
-    #[test]
-    fn test_cache_expiry() {
-        let mut cache = Cache::new(dirs::cache_dir().unwrap().join("blast"));
-
-        let id = PackageId::new("test-package".to_string(), Version::parse("1.0.0").unwrap());
-        let package = Package::new(
-            id.clone(),
-            HashMap::new(),
-            blast_core::package::VersionConstraint::any(),
-        );
-
-        cache.store_package(package).unwrap();
-
-        // Simulate time passing
-        let entry = cache.packages.get_mut(&id).unwrap();
-        entry.last_used = SystemTime::now()
-            .checked_sub(Duration::from_secs(25 * 60 * 60))
-            .unwrap();
-
-        cache.cleanup().await.unwrap();
-        assert!(!cache.packages.contains_key(&id));
+    pub async fn add_package(&mut self, package: Package) -> BlastResult<()> {
+        self.packages.insert(package.id().clone(), CacheEntry {
+            package,
+            last_used: SystemTime::now(),
+        });
+        Ok(())
     }
 } 

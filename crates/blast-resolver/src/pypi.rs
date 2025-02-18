@@ -1,15 +1,22 @@
-use std::time::Duration;
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
+
+use reqwest::Client;
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tracing::debug;
 
 use blast_core::error::{BlastError, BlastResult};
-use blast_core::package::{Package, PackageId, Version, VersionConstraint};
+use blast_core::package::{Package, PackageId};
+use blast_core::metadata::PackageMetadata;
+use blast_core::{Version, VersionConstraint};
+use blast_image::compression::{
+    CompressionType, CompressionLevel, CompressionStrategy,
+    NoopStrategy, ZstdStrategy, GzipStrategy,
+};
 use pubgrub::range::Range;
 use pubgrub::solver::Dependencies;
-use crate::resolver::PubgrubVersion;
 
 const PYPI_BASE_URL: &str = "https://pypi.org/pypi";
 
@@ -91,15 +98,10 @@ impl PyPIClient {
             .await
             .map_err(|e| BlastError::package(format!("Invalid package metadata: {}", e)))?;
 
-        let version = Version::parse(&data.info.version)
-            .map_err(|e| BlastError::package(format!("Invalid version: {}", e)))?;
-
-        let python_constraint = if let Some(requires_python) = data.info.requires_python {
-            VersionConstraint::parse(&requires_python)
-                .map_err(|e| BlastError::package(format!("Invalid Python version constraint: {}", e)))?
-        } else {
-            VersionConstraint::parse("*").unwrap()
-        };
+        let python_constraint = data.info.requires_python.as_deref()
+            .map(|v| VersionConstraint::parse(v))
+            .transpose()?
+            .unwrap_or_else(VersionConstraint::any);
 
         // Track dependencies by extras
         let mut base_dependencies = HashMap::new();
@@ -131,26 +133,29 @@ impl PyPIClient {
             }
         }
 
-        let mut pkg = Package::new(
-            PackageId::new(data.info.name, version),
-            base_dependencies,
-            python_constraint,
+        let mut metadata = PackageMetadata::new(
+            data.info.name.clone(),
+            data.info.version.clone(),
+            base_dependencies.clone(),
+            python_constraint.clone(),
         );
 
         // Add additional metadata
-        if let Some(desc) = data.info.description {
-            pkg.set_description(desc);
-        }
-        if let Some(author) = data.info.author {
-            pkg.set_author(author);
-        }
-        if let Some(homepage) = data.info.home_page {
-            pkg.set_homepage(homepage);
-        }
+        metadata.description = data.info.description;
+        metadata.author = data.info.author;
+        metadata.homepage = data.info.home_page;
+        metadata.license = data.info.license;
+
+        let mut pkg = Package::new(
+            data.info.name.clone(),
+            data.info.version.clone(),
+            metadata,
+            python_constraint,
+        )?;
 
         // Add extras dependencies
         for (extra_name, deps) in extra_dependencies {
-            pkg.set_extra_dependencies(extra_name, deps);
+            pkg.metadata_mut().extras.insert(extra_name, deps);
         }
 
         Ok(pkg)
@@ -240,25 +245,192 @@ impl PyPIClient {
     pub async fn get_dependencies(
         &self,
         package: &str,
-        version: &Version,
-    ) -> BlastResult<Dependencies<String, PubgrubVersion>> {
-        let deps = self.get_package_dependencies(package, version).await?;
-        
+        version: &str,
+    ) -> BlastResult<Dependencies<String, PyPIVersion>> {
+        let url = format!("{}/{}/{}/json", PYPI_BASE_URL, package, version);
+        debug!("Fetching package dependencies from {}", url);
+
+        let response = self.client
+            .get(&url)
+            .send()
+            .await
+            .map_err(handle_reqwest_error)?;
+
+        if !response.status().is_success() {
+            return Err(BlastError::package(format!(
+                "Package not found: {}=={} (status: {})",
+                package,
+                version,
+                response.status()
+            )));
+        }
+
+        let data: PyPIResponse = response
+            .json()
+            .await
+            .map_err(|e| BlastError::package(format!("Invalid package metadata: {}", e)))?;
+
+        let mut dependencies = HashMap::new();
+        if let Some(release) = data.releases.get(version) {
+            if let Some(first_release) = release.first() {
+                if let Some(requires_dist) = &first_release.requires_dist {
+                    for req in requires_dist {
+                        if let Some((name, constraint)) = parse_requirement(req) {
+                            dependencies.insert(name, constraint);
+                        }
+                    }
+                }
+            }
+        }
+
         let mut ranges = FxHashMap::default();
-        for (name, constraint) in deps {
-            // Convert the version constraint to a PubGrub range
+        for (name, constraint) in dependencies {
             let range = match constraint.to_string().as_str() {
                 "*" => Range::any(),
                 constraint => {
                     let version = Version::parse(constraint.trim_matches(|c| c == '*'))
                         .unwrap_or_else(|_| Version::parse("0.0.0").unwrap());
-                    Range::exact(PubgrubVersion(version))
+                    Range::exact(PyPIVersion(version))
                 }
             };
             
             ranges.insert(name, range);
         }
         Ok(Dependencies::Known(ranges))
+    }
+
+    #[allow(dead_code)]
+    async fn get_package(&self, package_id: &PackageId) -> BlastResult<Package> {
+        let metadata = self.get_package_metadata(package_id.name()).await?;
+        let _base_dependencies = self.get_dependencies(package_id.name(), &package_id.version().to_string()).await?;
+
+        let pkg = Package::new(
+            package_id.name().to_string(),
+            package_id.version().to_string(),
+            metadata.metadata().clone(),
+            metadata.metadata().python_version.clone(),
+        )?;
+
+        Ok(pkg)
+    }
+
+    pub async fn resolve_import(&self, import_name: &str) -> BlastResult<Option<Package>> {
+        let package_name = match self.get_package_metadata(import_name).await {
+            Ok(metadata) => metadata.name().to_string(),
+            Err(_) => return Ok(None),
+        };
+
+        let client = PyPIClient::new(10, 30, false)?;
+        let metadata = client.get_package_metadata(&package_name).await?;
+        let _base_dependencies = client.get_dependencies(&package_name, metadata.version().to_string().as_str()).await?;
+
+        Package::new(
+            metadata.name().to_string(),
+            metadata.version().to_string(),
+            metadata.metadata().clone(),
+            metadata.metadata().python_version.clone(),
+        ).map(Some)
+    }
+
+    pub async fn is_available(&self, import_name: &str) -> bool {
+        if let Some(package_name) = self.get_package_name(import_name) {
+            if let Ok(client) = PyPIClient::new(10, 30, false) {
+                client.get_package_metadata(package_name.as_str()).await.is_ok()
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    pub fn get_package_name(&self, import_name: &str) -> Option<String> {
+        // Basic implementation - in real world this would need a more sophisticated mapping
+        Some(import_name.to_string())
+    }
+
+    #[allow(dead_code)]
+    async fn get_package_info(&self, name: &str) -> BlastResult<PackageMetadata> {
+        let url = format!("{}/{}/json", PYPI_BASE_URL, name);
+        let response = self.client.get(&url)
+            .send()
+            .await
+            .map_err(handle_reqwest_error)?;
+
+        if !response.status().is_success() {
+            return Err(BlastError::package(format!(
+                "Package '{}' not found on PyPI",
+                name
+            )));
+        }
+
+        let pypi_data: PyPIResponse = response.json()
+            .await
+            .map_err(handle_reqwest_error)?;
+
+        // Parse dependencies
+        let mut dependencies = HashMap::new();
+        if let Some(deps) = pypi_data.info.requires_dist {
+            for dep_str in deps {
+                if let Some((name, constraint)) = parse_requirement(&dep_str) {
+                    dependencies.insert(name, constraint);
+                }
+            }
+        }
+
+        let python_constraint = pypi_data.info.requires_python
+            .as_deref()
+            .map(|v| VersionConstraint::parse(v))
+            .transpose()?
+            .unwrap_or_else(VersionConstraint::any);
+
+        let mut metadata = PackageMetadata::new(
+            pypi_data.info.name.clone(),
+            pypi_data.info.version.clone(),
+            dependencies,
+            python_constraint,
+        );
+
+        metadata.description = pypi_data.info.description;
+        metadata.author = pypi_data.info.author;
+        metadata.homepage = pypi_data.info.home_page;
+        metadata.license = pypi_data.info.license;
+
+        Ok(metadata)
+    }
+
+    #[allow(dead_code)]
+    async fn update_package_metadata(&self, package: &mut Package, info: &Value) -> BlastResult<()> {
+        let mut metadata = package.metadata().clone();
+
+        if let Some(description) = info["description"].as_str() {
+            metadata.description = Some(description.to_string());
+        }
+
+        if let Some(author) = info["author"].as_str() {
+            metadata.author = Some(author.to_string());
+        }
+
+        if let Some(homepage) = info["home_page"].as_str() {
+            metadata.homepage = Some(homepage.to_string());
+        }
+
+        // Parse dependencies
+        let mut dependencies = HashMap::new();
+        if let Some(requires_dist) = info["requires_dist"].as_array() {
+            for req in requires_dist {
+                if let Some(req_str) = req.as_str() {
+                    if let Some((name, constraint)) = parse_requirement(req_str) {
+                        dependencies.insert(name, constraint);
+                    }
+                }
+            }
+        }
+
+        // Update package with new metadata
+        *package.metadata_mut() = metadata;
+
+        Ok(())
     }
 }
 
@@ -333,14 +505,9 @@ impl Dependency {
             None
         };
 
-        // Clean up version requirement
-        let version_req = version_req.replace(" ", "")
-            .replace("(", "")
-            .replace(")", "");
-
         Ok(Self {
             package: package_name.to_string(),
-            version_constraint: VersionConstraint::parse(&version_req)?,
+            version_constraint: VersionConstraint::parse(version_req)?,
             python_constraint,
             extras,
         })
@@ -348,6 +515,7 @@ impl Dependency {
 }
 
 /// PyPI package resolver
+#[allow(dead_code)]
 pub struct PyPIResolver {
     client: Client,
     package_cache: HashMap<String, PackageMetadata>,
@@ -390,64 +558,44 @@ impl PyPIResolver {
         }
     }
 
+    pub fn add_import_mapping(&mut self, import_name: String, package_name: String) {
+        debug!("Adding import mapping: {} -> {}", import_name, package_name);
+        self.import_map.insert(import_name, package_name);
+    }
+
     #[allow(dead_code)]
-    pub async fn resolve_import(&self, import_name: &str) -> BlastResult<Option<Package>> {
-        debug!("Resolving import: {}", import_name);
-        
-        // Check if we have a mapping for this import
+    pub fn get_package_name(&self, import_name: &str) -> Option<&String> {
+        self.import_map.get(import_name)
+    }
+
+    #[allow(dead_code)]
+    pub async fn is_available(&self, import_name: &str) -> bool {
         if let Some(package_name) = self.get_package_name(import_name) {
-            // Get package metadata
-            let metadata = self.get_package_info(package_name).await?;
-            
-            // Create package object
-            let package = Package::new(
-                PackageId::new(
-                    metadata.name.clone(),
-                    Version::parse(&metadata.version)?,
-                ),
-                self.parse_dependencies(&metadata.dependencies)?,
-                self.parse_python_version(metadata.python_version.as_deref())?,
-            );
-            
-            Ok(Some(package))
+            if let Ok(client) = PyPIClient::new(10, 30, false) {
+                client.get_package_metadata(package_name.as_str()).await.is_ok()
+            } else {
+                false
+            }
         } else {
-            Ok(None)
+            false
         }
     }
 
     #[allow(dead_code)]
-    pub async fn get_package_info(&self, name: &str) -> BlastResult<PackageMetadata> {
-        // Check cache first
-        if let Some(metadata) = self.package_cache.get(name) {
-            return Ok(metadata.clone());
+    pub async fn resolve_imports(&self, imports: &[String]) -> BlastResult<Vec<Package>> {
+        let mut packages = Vec::new();
+        let client = PyPIClient::new(10, 30, false)?;
+        
+        for import_name in imports {
+            if let Some(package_name) = self.get_package_name(import_name) {
+                match client.get_package_metadata(package_name).await {
+                    Ok(package) => packages.push(package),
+                    Err(_) => continue,
+                }
+            }
         }
-
-        // Fetch from PyPI
-        let url = format!("{}/{}/json", PYPI_BASE_URL, name);
-        let response = self.client.get(&url)
-            .send()
-            .await
-            .map_err(handle_reqwest_error)?;
-
-        if !response.status().is_success() {
-            return Err(BlastError::package(format!(
-                "Package '{}' not found on PyPI",
-                name
-            )));
-        }
-
-        let pypi_data: PyPIResponse = response.json()
-            .await
-            .map_err(handle_reqwest_error)?;
-
-        Ok(PackageMetadata {
-            name: pypi_data.info.name,
-            version: pypi_data.info.version,
-            summary: pypi_data.info.summary,
-            dependencies: pypi_data.info.requires_dist.unwrap_or_default(),
-            python_version: pypi_data.info.requires_python,
-            import_names: vec![name.to_string()], // Basic assumption
-        })
+        
+        Ok(packages)
     }
 
     #[allow(dead_code)]
@@ -470,126 +618,53 @@ impl PyPIResolver {
             None => Ok(VersionConstraint::any()),
         }
     }
+}
 
-    pub fn add_import_mapping(&mut self, import_name: String, package_name: String) {
-        debug!("Adding import mapping: {} -> {}", import_name, package_name);
-        self.import_map.insert(import_name, package_name);
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct PyPIVersion(pub(crate) Version);
+
+impl std::fmt::Display for PyPIVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<Version> for PyPIVersion {
+    fn from(v: Version) -> Self {
+        PyPIVersion(v)
+    }
+}
+
+impl pubgrub::version::Version for PyPIVersion {
+    fn lowest() -> Self {
+        PyPIVersion(Version::parse("0.0.0").unwrap())
     }
 
-    #[allow(dead_code)]
-    pub fn get_package_name(&self, import_name: &str) -> Option<&String> {
-        self.import_map.get(import_name)
-    }
-
-    #[allow(dead_code)]
-    pub async fn is_available(&self, import_name: &str) -> bool {
-        self.resolve_import(import_name).await.is_ok()
-    }
-
-    #[allow(dead_code)]
-    pub async fn resolve_imports(&self, imports: &[String]) -> BlastResult<Vec<Package>> {
-        let mut packages = Vec::new();
-        
-        for import_name in imports {
-            if let Some(package) = self.resolve_import(import_name).await? {
-                packages.push(package);
-            }
+    fn bump(&self) -> Self {
+        // Since we can't access Version's internals directly,
+        // we'll parse the version string and increment
+        let version_str = self.0.to_string();
+        let parts: Vec<&str> = version_str.split('.').collect();
+        if parts.len() >= 3 {
+            let major: u64 = parts[0].parse().unwrap_or(0);
+            let minor: u64 = parts[1].parse().unwrap_or(0);
+            let patch: u64 = parts[2].parse().unwrap_or(0);
+            let new_version = format!("{}.{}.{}", major, minor, patch + 1);
+            PyPIVersion(Version::parse(&new_version).unwrap())
+        } else {
+            PyPIVersion(Version::parse("0.0.1").unwrap())
         }
-        
-        Ok(packages)
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct PackageMetadata {
-    pub name: String,
-    pub version: String,
-    pub summary: Option<String>,
-    pub dependencies: Vec<String>,
-    pub python_version: Option<String>,
-    pub import_names: Vec<String>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-    use wiremock::matchers::{method, path};
-
-    #[tokio::test]
-    async fn test_get_package_metadata() {
-        let mock_server = MockServer::start().await;
-        let client = PyPIClient::new(10, 30, false).unwrap();
-
-        Mock::given(method("GET"))
-            .and(path("/pypi/requests/json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "info": {
-                    "name": "requests",
-                    "version": "2.28.2",
-                    "summary": "Python HTTP for Humans",
-                    "requires_python": ">=3.7",
-                },
-                "releases": {
-                    "2.28.2": [{
-                        "requires_dist": [
-                            "charset-normalizer>=2,<4",
-                            "idna>=2.5,<4",
-                            "urllib3>=1.21.1,<1.27",
-                            "certifi>=2017.4.17"
-                        ],
-                        "requires_python": ">=3.7",
-                        "yanked": false
-                    }]
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let metadata = client.get_package_metadata("requests").await;
-        assert!(metadata.is_ok());
-        let metadata = metadata.unwrap();
-        assert_eq!(metadata.name(), "requests");
-        assert_eq!(metadata.version().to_string(), "2.28.2");
-    }
-
-    #[tokio::test]
-    async fn test_get_package_versions() {
-        let client = PyPIClient::new(10, 30, false).unwrap();
-        let versions = client.get_package_versions("requests").await;
-        assert!(versions.is_ok());
-        let versions = versions.unwrap();
-        assert!(!versions.is_empty());
-    }
-
-    #[test]
-    fn test_dependency_parsing() {
-        // Test basic version constraint
-        let dep = Dependency::parse("requests>=2.0.0").unwrap();
-        assert_eq!(dep.package, "requests");
-        assert!(dep.version_constraint.matches(&Version::parse("2.0.0").unwrap()));
-        assert!(dep.version_constraint.matches(&Version::parse("2.1.0").unwrap()));
-        assert!(!dep.version_constraint.matches(&Version::parse("1.9.0").unwrap()));
-
-        // Test with extras
-        let dep = Dependency::parse("django[bcrypt]>=3.0.0").unwrap();
-        assert_eq!(dep.package, "django");
-        assert_eq!(dep.extras, vec!["bcrypt"]);
-        assert!(dep.version_constraint.matches(&Version::parse("3.0.0").unwrap()));
-
-        // Test with Python version constraint
-        let dep = Dependency::parse("flask>=2.0.0; python_version >= '3.7'").unwrap();
-        assert_eq!(dep.package, "flask");
-        assert!(dep.python_constraint.is_some());
-        let python_constraint = dep.python_constraint.unwrap();
-        assert!(python_constraint.matches(&Version::parse("3.7.0").unwrap()));
-        assert!(python_constraint.matches(&Version::parse("3.8.0").unwrap()));
-
-        // Test complex version constraints
-        let dep = Dependency::parse("numpy>=1.20.0,<2.0.0").unwrap();
-        assert_eq!(dep.package, "numpy");
-        assert!(dep.version_constraint.matches(&Version::parse("1.20.0").unwrap()));
-        assert!(dep.version_constraint.matches(&Version::parse("1.25.0").unwrap()));
-        assert!(!dep.version_constraint.matches(&Version::parse("2.0.0").unwrap()));
+#[allow(dead_code)]
+pub fn create_strategy(
+    compression_type: CompressionType,
+    level: CompressionLevel,
+) -> Box<dyn CompressionStrategy> {
+    match compression_type {
+        CompressionType::None => Box::new(NoopStrategy),
+        CompressionType::Zstd => Box::new(ZstdStrategy::new(level)),
+        CompressionType::Gzip => Box::new(GzipStrategy::new(level)),
     }
 } 

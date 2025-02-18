@@ -8,8 +8,11 @@ license = "MIT"
 
 [dependencies]
 # Internal dependencies
-blast-core = { path = "../blast-core", features = ["serde"] }
+blast-core = { path = "../blast-core", features = ["serde-support"] }
 blast-cache = { path = "../blast-cache" }
+
+# Version handling
+semver = { workspace = true }
 
 # Async runtime
 tokio = { version = "1.0", features = ["fs"] }
@@ -29,6 +32,7 @@ tracing-subscriber = { workspace = true }
 
 # Compression
 zstd = "0.13"
+flate2 = "1.0"
 tar = "0.4"
 
 # Hashing

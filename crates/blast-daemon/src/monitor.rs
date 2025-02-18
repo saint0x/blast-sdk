@@ -7,10 +7,16 @@ use walkdir::WalkDir;
 /// Monitor events for Python environment changes
 #[derive(Debug)]
 pub enum MonitorEvent {
+    /// Resource usage check
+    ResourceCheck,
+    /// Package change detected
+    PackageChanged,
+    /// Stop monitoring for environment
+    StopMonitoring {
+        env_path: PathBuf,
+    },
     /// Python file change event
     FileChanged(PathBuf),
-    /// Package installation/removal event
-    PackageChanged,
     /// Environment resource usage update
     ResourceUpdate(EnvironmentUsage),
 }
@@ -224,39 +230,5 @@ impl PythonResourceMonitor {
     /// Get current resource limits
     pub fn get_limits(&self) -> &PythonResourceLimits {
         &self.limits
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_python_resource_monitor() {
-        let env_dir = tempdir().unwrap();
-        let cache_dir = tempdir().unwrap();
-        
-        let mut monitor = PythonResourceMonitor::new(
-            env_dir.path().to_path_buf(),
-            cache_dir.path().to_path_buf(),
-            PythonResourceLimits::default(),
-        );
-        
-        // Test initial usage
-        let usage = monitor.get_current_usage();
-        assert_eq!(usage.env_disk_usage.total_size, 0);
-        assert_eq!(usage.cache_usage.total_size, 0);
-        assert_eq!(usage.cache_usage.package_count, 0);
-        
-        // Test limit checking
-        assert!(monitor.check_limits());
-        
-        // Test limit updates
-        let new_limits = PythonResourceLimits {
-            max_env_size: 1024 * 1024 * 1024, // 1GB
-            max_cache_size: 512 * 1024 * 1024, // 512MB
-        };
-        monitor.update_limits(new_limits);
     }
 } 

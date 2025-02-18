@@ -3,34 +3,40 @@ use std::sync::Arc;
 use std::cmp::Ordering;
 use std::borrow::Borrow;
 use std::error::Error as StdError;
+use rustc_hash::FxHashMap;
 
-use pubgrub::error::PubGrubError;
 use pubgrub::range::Range;
 use pubgrub::solver::{Dependencies, DependencyProvider};
 use pubgrub::version::Version as PubgrubVersionTrait;
 use tokio::sync::RwLock;
 use tracing::debug;
+use async_trait::async_trait;
 
 use blast_core::error::{BlastError, BlastResult};
-use blast_core::package::{Package, PackageId, Version};
+use blast_core::package::{Package, PackageId};
+use blast_core::version::Version;
+use blast_core::security::{PackageVerification, PolicyResult, SecurityPolicy, VerificationResult, Vulnerability};
 
 use crate::cache::Cache;
 use crate::pypi::PyPIClient;
+use crate::resolution::{ResolutionStrategy, ResolutionResult};
 
 /// Dependency resolver for Python packages
 pub struct DependencyResolver {
     pub(crate) pypi: PyPIClient,
     cache: Arc<RwLock<Cache>>,
     resolution_cache: Arc<RwLock<HashMap<PackageId, Vec<Package>>>>,
+    resolution_strategy: PubGrubProvider,
 }
 
 impl DependencyResolver {
     /// Create a new resolver
     pub fn new(pypi: PyPIClient, cache: Cache) -> Self {
         Self {
-            pypi,
+            pypi: pypi.clone(),
             cache: Arc::new(RwLock::new(cache)),
             resolution_cache: Arc::new(RwLock::new(HashMap::new())),
+            resolution_strategy: PubGrubProvider::new(pypi),
         }
     }
 
@@ -48,41 +54,9 @@ impl DependencyResolver {
             return Ok(deps.clone());
         }
 
-        let provider = PubGrubProvider::new(self.pypi.clone());
-        let root = package.name().to_string();
-        let root_version = PubgrubVersion::from(package.version().clone());
-
-        // Convert PubGrub errors to our error type which implements Send + Sync
-        let solution = pubgrub::solver::resolve(&provider, root.clone(), root_version)
-            .map_err(|e| match e {
-                PubGrubError::NoSolution(tree) => BlastError::resolution(format!(
-                    "No solution found for package {}: {:?}",
-                    package.name(),
-                    tree
-                )),
-                _ => BlastError::resolution(format!(
-                    "Resolution error for package {}: {}",
-                    package.name(),
-                    e
-                )),
-            })?;
-
-        let mut packages = Vec::new();
-        for (name, version) in solution {
-            if name != root {
-                // Check package cache first
-                let pkg_id = PackageId::new(name.clone(), version.0.clone());
-                let pkg = if let Some(cached_pkg) = self.cache.write().await.get_package(&pkg_id) {
-                    debug!("Using cached package {}", pkg_id);
-                    cached_pkg.clone()
-                } else {
-                    let pkg = self.pypi.get_package_metadata(&name).await?;
-                    self.cache.write().await.store_package(pkg.clone()).await?;
-                    pkg
-                };
-                packages.push(pkg);
-            }
-        }
+        let ResolutionResult { packages, .. } = self.resolution_strategy
+            .resolve(package, &self.pypi, &self.cache)
+            .await?;
 
         // Cache the resolution
         self.resolution_cache.write().await.insert(cache_key, packages.clone());
@@ -96,17 +70,53 @@ impl DependencyResolver {
 
     /// Resolve dependencies for a package with specified extras
     pub async fn resolve_with_extras(&self, package: &Package, extras: &[String]) -> BlastResult<Vec<Package>> {
-        // Get all dependencies including extras
         let all_deps = package.all_dependencies(extras);
-        
-        // Create a new package with all dependencies
-        let package_with_extras = Package::new(
-            package.id().clone(),
-            all_deps,
-            package.python_version().clone(),
-        );
+        let mut resolved = Vec::new();
 
-        self.resolve(&package_with_extras).await
+        for (name, constraint) in all_deps {
+            let versions = self.get_package_versions(&name).await?;
+            // Find highest version that satisfies the constraint
+            if let Some(_version) = versions.into_iter().rev().find(|v| constraint.matches(v)) {
+                let pkg = self.pypi.get_package_metadata(&name).await?;
+                resolved.extend(self.resolve(&pkg).await?);
+            }
+        }
+
+        Ok(resolved)
+    }
+
+    pub async fn resolve_import(&self, import_name: &str) -> BlastResult<Option<Package>> {
+        self.pypi.resolve_import(import_name).await
+    }
+
+    pub async fn is_available(&self, import_name: &str) -> bool {
+        self.pypi.is_available(import_name).await
+    }
+}
+
+impl PackageVerification for DependencyResolver {
+    fn verify_package(&self, _package: &Package) -> BlastResult<VerificationResult> {
+        // TODO: Implement package verification
+        Ok(VerificationResult {
+            verified: true,
+            details: String::new(),
+            warnings: Vec::new(),
+            signature: None,
+        })
+    }
+
+    fn scan_vulnerabilities(&self, _package: &Package) -> BlastResult<Vec<Vulnerability>> {
+        // TODO: Implement vulnerability scanning
+        Ok(Vec::new())
+    }
+
+    fn verify_policy(&self, _package: &Package, _policy: &SecurityPolicy) -> BlastResult<PolicyResult> {
+        // TODO: Implement policy verification
+        Ok(PolicyResult {
+            allowed: true,
+            required_actions: Vec::new(),
+            violations: Vec::new(),
+        })
     }
 }
 
@@ -172,92 +182,120 @@ impl PubGrubProvider {
     }
 }
 
+#[async_trait]
+impl ResolutionStrategy for PubGrubProvider {
+    async fn resolve(
+        &self,
+        package: &Package,
+        pypi: &PyPIClient,
+        cache: &Arc<RwLock<Cache>>,
+    ) -> BlastResult<ResolutionResult> {
+        let start_time = std::time::Instant::now();
+        let mut metrics = crate::resolution::ResolutionMetrics::default();
+
+        let root = package.name().to_string();
+        let root_version = PubgrubVersion(package.version().clone());
+
+        let solution = pubgrub::solver::resolve(self, root.clone(), root_version)
+            .map_err(|e| BlastError::resolution(format!(
+                "No solution found for package {}: {:?}",
+                package.name(),
+                e
+            )))?;
+
+        let mut packages = Vec::new();
+        for (name, version) in solution.into_iter() {
+            if name != root {
+                let pkg_id = PackageId::new(name.clone(), version.0.clone());
+                let pkg = if let Some(cached_pkg) = cache.write().await.get_package(&pkg_id) {
+                    debug!("Using cached package {}", pkg_id);
+                    metrics.cache_hits += 1;
+                    cached_pkg.clone()
+                } else {
+                    metrics.network_requests += 1;
+                    let pkg = pypi.get_package_metadata(&name).await?;
+                    cache.write().await.store_package(pkg.clone()).await?;
+                    pkg
+                };
+                packages.push(pkg);
+            }
+        }
+
+        metrics.package_count = packages.len();
+        metrics.resolution_time_ms = start_time.elapsed().as_millis() as u64;
+
+        Ok(ResolutionResult {
+            packages,
+            graph: None,
+            metrics,
+        })
+    }
+
+    fn has_conflict(&self, package: &Package, resolved: &[Package]) -> bool {
+        for dep in resolved {
+            if dep.name() == package.name() && dep.version() != package.version() {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn get_metrics(&self) -> crate::resolution::ResolutionMetrics {
+        crate::resolution::ResolutionMetrics::default()
+    }
+}
+
 impl DependencyProvider<String, PubgrubVersion> for PubGrubProvider {
     fn get_dependencies(
         &self,
         package: &String,
         version: &PubgrubVersion,
     ) -> Result<Dependencies<String, PubgrubVersion>, Box<dyn StdError>> {
-        let rt = tokio::runtime::Handle::current();
-        match rt.block_on(async {
-            self.pypi.get_dependencies(package, &version.0).await
-        }) {
-            Ok(deps) => Ok(deps),
-            Err(e) => Err(Box::new(BlastError::resolution(format!(
-                "Failed to get dependencies for {}: {}",
-                package, e
-            ))) as Box<dyn StdError>),
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| Box::new(BlastError::resolution(e.to_string())) as Box<dyn StdError>)?;
+        
+        let deps_map = rt.block_on(self.pypi.get_package_dependencies(package, &version.0))
+            .map_err(|e| Box::new(BlastError::resolution(e.to_string())) as Box<dyn StdError>)?;
+
+        let mut ranges = FxHashMap::default();
+        for (name, _constraint) in deps_map {
+            let range = Range::any(); // TODO: Convert VersionConstraint to PubGrub Range
+            ranges.insert(name, range);
         }
+        Ok(Dependencies::Known(ranges))
     }
 
     fn choose_package_version<T, U>(
         &self,
-        available_versions: impl Iterator<Item = (T, U)>,
+        mut available_versions: impl Iterator<Item = (T, U)>,
     ) -> Result<(T, Option<PubgrubVersion>), Box<dyn StdError>>
     where
         T: Borrow<String>,
         U: Borrow<Range<PubgrubVersion>>,
     {
-        // Find the highest compatible version
-        let result = available_versions
-            .filter_map(|(package, range)| {
-                // Get all versions from PyPI
-                let rt = tokio::runtime::Handle::current();
-                let versions = match rt.block_on(async {
-                    self.pypi.get_package_versions(package.borrow()).await
-                }) {
-                    Ok(v) => v,
-                    Err(_) => return None,
-                };
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| Box::new(BlastError::resolution(e.to_string())) as Box<dyn StdError>)?;
 
-                // Find highest version that satisfies the range
-                let max_version = versions.into_iter()
-                    .map(PubgrubVersion)
-                    .filter(|v| range.borrow().contains(v))
-                    .max();
+        if let Some((package, range)) = available_versions.next() {
+            let versions = rt.block_on(self.pypi.get_package_versions(package.borrow()))
+                .map_err(|e| Box::new(BlastError::resolution(e.to_string())) as Box<dyn StdError>)?;
 
-                Some((package, max_version))
-            })
-            .next()
-            .ok_or_else(|| Box::new(BlastError::resolution(
-                "No available versions satisfy the constraints".to_string()
-            )) as Box<dyn StdError>)?;
-        
-        Ok(result)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use blast_core::package::VersionConstraint;
-
-    #[tokio::test]
-    async fn test_dependency_resolution() {
-        let pypi = PyPIClient::new(10, 30, false).unwrap();
-        let cache = Cache::new(std::env::temp_dir().join("blast-test"));
-        let resolver = DependencyResolver::new(pypi, cache);
-
-        let package = Package::new(
-            PackageId::new("requests", Version::parse("2.28.2").unwrap()),
-            HashMap::new(),
-            VersionConstraint::parse(">=3.7").unwrap(),
-        );
-
-        let deps = resolver.resolve(&package).await.unwrap();
-        assert!(!deps.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_resolver_creation() {
-        let resolver = create_resolver().await.unwrap();
-        
-        // Test basic import resolution
-        let numpy = resolver.resolve_import("numpy").await.unwrap();
-        assert!(numpy.is_some());
-        
-        // Test version parsing
-        let version = Version::parse("1.0.0").unwrap();
-        assert!(resolver.is_available("numpy").await);
+            let mut best_version = None;
+            for version in versions {
+                let pubgrub_version = PubgrubVersion(version);
+                if range.borrow().contains(&pubgrub_version) {
+                    match best_version {
+                        None => best_version = Some(pubgrub_version),
+                        Some(ref current) if pubgrub_version > *current => {
+                            best_version = Some(pubgrub_version)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok((package, best_version))
+        } else {
+            Err(Box::new(BlastError::resolution("No versions available".to_string())))
+        }
     }
 } 

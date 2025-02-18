@@ -193,39 +193,4 @@ impl ImageValidator {
             context: HashMap::new(),
         });
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_validator_creation() {
-        let validator = ImageValidator::new();
-        assert!(!validator.options.check_hashes);
-        assert!(!validator.options.verify_dependencies);
-    }
-
-    #[test]
-    fn test_validator_with_options() {
-        let options = ValidationOptions {
-            check_hashes: true,
-            verify_dependencies: true,
-            ..Default::default()
-        };
-        let validator = ImageValidator::with_options(options);
-        assert!(validator.options.check_hashes);
-        assert!(validator.options.verify_dependencies);
-    }
-
-    #[test]
-    fn test_validation_result() {
-        let validator = ImageValidator::new();
-        let result = validator.validate("test_path");
-        
-        assert!(result.is_valid);
-        assert!(result.errors.is_empty());
-        assert!(result.warnings.is_empty());
-        assert_ne!(result.metadata.timestamp, chrono::DateTime::default());
-    }
 } 

@@ -1,0 +1,23 @@
+#!/bin/bash
+
+if [ "$1" = "start" ]; then
+    # Run blast-rs and capture both stdout and stderr
+    output=$(blast-rs start "${@:2}" 2>&1)
+    status=$?
+    
+    if [ $status -eq 0 ]; then
+        # Extract the source command (last line) and execute it
+        source_cmd=$(echo "$output" | tail -n 1)
+        # Show the environment creation message (all but last line)
+        echo "$output" | head -n -1
+        # Execute the source command
+        eval "$source_cmd"
+    else
+        # If there was an error, just show the output
+        echo "$output"
+        exit $status
+    fi
+else
+    # For all other commands, just pass through to the main binary
+    exec blast-rs "$@"
+fi 

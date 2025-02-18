@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 # Internal dependencies
-blast-core = { path = "../blast-core" }
+blast-core = { path = "../blast-core", features = ["serde-support"] }
 blast-resolver = { path = "../blast-resolver" }
 blast-cache = { path = "../blast-cache" }
 blast-image = { path = "../blast-image" }
@@ -57,7 +57,12 @@ windows-sys = { version = "0.48", features = ["Win32_Security_Isolation"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "2.9.2"
 
+# Additional dependencies
+toml = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+
 [dev-dependencies]
 tokio-test = "0.4"
-tempfile = "3.8"
+tempfile = "3.0"
 mockall = { workspace = true }

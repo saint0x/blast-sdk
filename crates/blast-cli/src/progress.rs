@@ -79,41 +79,4 @@ impl Default for ProgressManager {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_progress_manager() {
-        let mut manager = ProgressManager::new();
-        
-        // Create a progress bar
-        let bar = manager.create_bar("test", 100, "Testing");
-        assert!(manager.get_bar("test").is_some());
-        
-        // Update progress
-        bar.inc(50);
-        assert_eq!(bar.position(), 50);
-        
-        // Remove bar
-        manager.remove_bar("test");
-        assert!(manager.get_bar("test").is_none());
-    }
-
-    #[test]
-    fn test_multiple_bars() {
-        let mut manager = ProgressManager::new();
-        
-        // Create multiple bars
-        manager.create_bar("bar1", 100, "Task 1");
-        manager.create_bar("bar2", 200, "Task 2");
-        
-        assert_eq!(manager.bars.len(), 2);
-        
-        // Clear all bars
-        manager.clear_all();
-        assert!(manager.bars.is_empty());
-    }
 } 

@@ -10,6 +10,11 @@ documentation = "https://docs.rs/blast"
 readme = "README.md"
 keywords = ["python", "virtualenv", "package-manager", "dependency-manager"]
 categories = ["development-tools", "command-line-utilities"]
+exclude = ["tests/*"]
+
+[[bin]]
+name = "blast"
+path = "src/main.rs"
 
 [workspace]
 members = [
@@ -23,7 +28,7 @@ members = [
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.35", features = ["full", "macros"] }
 async-trait = "0.1"
 
 # Error handling
@@ -69,7 +74,7 @@ blast-daemon = { path = "crates/blast-daemon" }
 blast-image = { path = "crates/blast-image" }
 blast-cli = { path = "crates/blast-cli" }
 
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full", "macros"] }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

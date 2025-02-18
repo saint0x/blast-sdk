@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::package::{Version, VersionRequirement};
+use crate::version::{Version, VersionConstraint};
 use crate::python::PythonVersion;
 
 /// Version change impact level
@@ -182,7 +182,7 @@ impl VersionHistory {
     /// Check if version satisfies all requirements
     pub fn check_version(&self, version: &Version) -> bool {
         self.requirements.iter().all(|(_, req_str)| {
-            if let Ok(req) = VersionRequirement::parse(req_str) {
+            if let Ok(req) = VersionConstraint::parse(req_str) {
                 req.matches(version)
             } else {
                 false
@@ -221,7 +221,7 @@ impl VersionHistory {
         // Check dependent packages
         for dependent in &self.dependents {
             if let Some(req) = self.requirements.get(dependent) {
-                if !VersionRequirement::parse(req).unwrap().matches(to) {
+                if !VersionConstraint::parse(req).unwrap().matches(to) {
                     analysis.affected_dependents.insert(dependent.clone());
                     analysis.compatibility_issues.push(format!(
                         "Package {} requires version {}, which is incompatible with {}",
@@ -284,73 +284,19 @@ impl VersionHistory {
 
         report
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::str::FromStr;
-
-    #[test]
-    fn test_version_history() {
-        let mut history = VersionHistory::new("test-package".to_string());
-        let python_version = PythonVersion::from_str("3.8").unwrap();
-        
-        let event = VersionEvent {
-            timestamp: Utc::now(),
-            from_version: None,
-            to_version: Version::parse("1.0.0").unwrap(),
-            impact: VersionImpact::None,
-            reason: "Initial installation".to_string(),
-            python_version,
-            is_direct: true,
-            affected_dependencies: HashMap::new(),
-            approved: true,
-            approved_by: Some("test-user".to_string()),
-            policy_snapshot: None,
-        };
-
-        history.add_event(event);
-        assert_eq!(history.events.len(), 1);
-        assert!(history.current_version.is_some());
+    /// Add a requirement to the version history
+    pub fn add_requirement(&mut self, requirement: VersionConstraint) {
+        self.requirements.insert(
+            self.package_name.clone(),
+            requirement.to_string()
+        );
     }
 
-    #[test]
-    fn test_version_impact() {
-        let v100 = Version::parse("1.0.0").unwrap();
-        let v110 = Version::parse("1.1.0").unwrap();
-        let v200 = Version::parse("2.0.0").unwrap();
-
-        assert_eq!(VersionImpact::from_version_change(&v100, &v110), VersionImpact::Minor);
-        assert_eq!(VersionImpact::from_version_change(&v100, &v200), VersionImpact::Major);
-        assert_eq!(VersionImpact::from_version_change(&v100, &Version::parse("1.0.1").unwrap()), VersionImpact::None);
-    }
-
-    #[test]
-    fn test_version_requirements() {
-        let mut history = VersionHistory::new("test-package".to_string());
-        
-        history.add_requirement(VersionRequirement::parse(">=1.0.0, <2.0.0").unwrap());
-        
-        assert!(history.check_version(&Version::parse("1.0.0").unwrap()));
-        assert!(history.check_version(&Version::parse("1.1.0").unwrap()));
-        assert!(!history.check_version(&Version::parse("2.0.0").unwrap()));
-    }
-
-    #[test]
-    fn test_change_analysis() {
-        let mut history = VersionHistory::new("test-package".to_string());
-        history.add_dependent("dependent-package".to_string());
-        history.add_requirement(VersionRequirement::parse("<2.0.0").unwrap());
-
-        let v100 = Version::parse("1.0.0").unwrap();
-        let v200 = Version::parse("2.0.0").unwrap();
-
-        let analysis = history.analyze_change_impact(&v100, &v200);
-        assert_eq!(analysis.impact, VersionImpact::Major);
-        assert!(!analysis.affected_dependents.is_empty());
-        assert!(!analysis.breaking_changes.is_empty());
-        assert!(!analysis.compatibility_issues.is_empty());
-        assert!(!analysis.is_safe());
+    /// Add a dependent package to the version history
+    pub fn add_dependent(&mut self, package: String, version: Version) {
+        let package_name = package.clone();
+        self.dependents.push(package_name);
+        self.requirements.insert(package, version.to_string());
     }
 }

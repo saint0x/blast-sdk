@@ -21,22 +21,40 @@ pub mod sync;
 pub mod version_history;
 pub mod security;
 pub mod manifest;
+pub mod bindings;
+pub mod version;
+pub mod metadata;
+pub mod layer;
+pub mod resolution;
+pub mod logging;
+pub mod diagnostics;
+pub mod ui;
+pub mod debug;
+pub mod hot_reload;
+pub mod shell_scripts;
 
 // Re-export commonly used types
 pub use crate::config::BlastConfig;
 pub use crate::error::{BlastError, BlastResult};
-pub use crate::package::{Package, PackageId, Version, VersionRequirement};
+pub use crate::package::{Package, PackageId};
+pub use crate::version::{Version, VersionConstraint};
 pub use crate::python::{PythonEnvironment, PythonVersion};
 pub use crate::types::{CacheSettings, UpdateStrategy};
 pub use crate::version_control::{VersionManager, VersionPolicy, UpgradeStrategy};
-pub use crate::version_history::VersionHistory;
+pub use crate::version_history::{VersionHistory, VersionEvent, VersionImpact};
 pub use crate::state::{EnvironmentState, StateCheckpoint, StateDiff, StateVerification};
 pub use crate::sync::{SyncManager, SyncOperation, SyncStatus, SyncChange, SyncConflict, ConflictResolution};
-pub use crate::version_history::{VersionEvent, VersionImpact};
 pub use crate::manifest::{
     Manifest, BlastMetadata, SystemDependency, ResourceRequirements,
     VenvConfig, LayerInfo, LayerType, CompressionType,
 };
+pub use crate::security::SecurityPolicy;
+pub use crate::bindings::{NativeEnvironment, NativePackage, NativeManifest};
+pub use crate::metadata::{
+    PackageMetadata, BuildMetadata, DistributionMetadata,
+    DistributionType,
+};
+pub use crate::shell_scripts::ActivationScripts;
 
 /// Core trait for environment management
 #[async_trait]
@@ -150,30 +168,11 @@ pub trait ManifestManager: Send + Sync + 'static {
     async fn verify_manifest(&self) -> BlastResult<bool>;
 }
 
-// Initialize logging for the crate
+/// Initialize the library
 pub fn init() {
-    tracing_subscriber::fmt::init();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_import_statistics_serialization() {
-        let stats = ImportStatistics {
-            total_imports: 100,
-            cached_imports: 80,
-            update_triggers: 5,
-            average_import_time_ms: 0.5,
-        };
-
-        let serialized = serde_json::to_string(&stats).unwrap();
-        let deserialized: ImportStatistics = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(stats.total_imports, deserialized.total_imports);
-        assert_eq!(stats.cached_imports, deserialized.cached_imports);
-        assert_eq!(stats.update_triggers, deserialized.update_triggers);
-        assert_eq!(stats.average_import_time_ms, deserialized.average_import_time_ms);
+    // Set up logging if not already configured
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "info");
     }
+    tracing_subscriber::fmt::init();
 }

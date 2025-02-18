@@ -1,18 +1,85 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
 };
-use tokio::sync::{Mutex, mpsc};
-use notify::{Watcher, RecursiveMode, Event};
-use python_parser::{ast, Parse};
-use tracing::{debug, info, warn};
+use tokio::sync::Mutex;
+use notify::{Watcher, RecursiveMode, Event, EventKind};
+use tracing::{debug, warn};
+use regex::Regex;
 use crate::{
     error::{BlastError, BlastResult},
-    package::{Package, Version},
+    version::Version,
     python::PythonEnvironment,
     sync::SyncManager,
+    package::Package,
 };
+
+/// Custom error type for hot reload operations
+#[derive(Debug, thiserror::Error)]
+pub enum HotReloadError {
+    #[error("Notify error: {0}")]
+    Notify(#[from] notify::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Python parsing error: {0}")]
+    PythonParse(String),
+}
+
+impl From<HotReloadError> for BlastError {
+    fn from(err: HotReloadError) -> Self {
+        BlastError::environment(err.to_string())
+    }
+}
+
+/// Represents a Python import statement
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImportStatement {
+    /// The module being imported
+    module: String,
+    /// Specific names being imported (for 'from' imports)
+    names: Vec<String>,
+    /// Whether this is a 'from' import
+    is_from: bool,
+    /// The full module path for 'from' imports
+    from_path: Option<String>,
+}
+
+impl ImportStatement {
+    fn new(module: String) -> Self {
+        Self {
+            module,
+            names: Vec::new(),
+            is_from: false,
+            from_path: None,
+        }
+    }
+
+    fn with_names(module: String, names: Vec<String>, from_path: String) -> Self {
+        Self {
+            module,
+            names,
+            is_from: true,
+            from_path: Some(from_path),
+        }
+    }
+
+    /// Get the root package name that needs to be installed
+    fn get_package_name(&self) -> String {
+        if self.is_from {
+            // For 'from' imports, use the first part of the path
+            self.from_path.as_ref()
+                .and_then(|p| p.split('.').next())
+                .unwrap_or(&self.module)
+                .to_string()
+        } else {
+            // For regular imports, use the first part of the module name
+            self.module.split('.').next()
+                .unwrap_or(&self.module)
+                .to_string()
+        }
+    }
+}
 
 /// Hot reload manager for Python environments
 pub struct HotReloadManager {
@@ -20,145 +87,203 @@ pub struct HotReloadManager {
     environments: Arc<Mutex<HashMap<String, EnvironmentContext>>>,
     /// File system watcher
     watcher: Arc<Mutex<notify::RecommendedWatcher>>,
-    /// Import cache
-    import_cache: Arc<Mutex<HashMap<String, ImportInfo>>>,
-    /// Import notification channel
-    import_tx: mpsc::Sender<ImportNotification>,
     /// Sync manager for version synchronization
     sync_manager: Arc<Mutex<SyncManager>>,
 }
 
 /// Environment context for hot reloading
+#[derive(Clone)]
 struct EnvironmentContext {
     /// Environment reference
     environment: PythonEnvironment,
-    /// Watched paths
-    watched_paths: HashSet<PathBuf>,
-    /// Active imports
-    active_imports: HashSet<String>,
     /// Package versions
     package_versions: HashMap<String, Version>,
     /// Last sync operation
     last_sync: Option<String>,
 }
 
-/// Import information
-#[derive(Debug, Clone)]
-struct ImportInfo {
-    /// Package name
-    package: String,
-    /// First seen timestamp
-    first_seen: chrono::DateTime<chrono::Utc>,
-    /// Last used timestamp
-    last_used: chrono::DateTime<chrono::Utc>,
-    /// Usage count
-    usage_count: u64,
-    /// Source files
-    sources: HashSet<PathBuf>,
-}
-
-/// Import notification from Python
-#[derive(Debug)]
-struct ImportNotification {
-    /// Environment name
-    environment: String,
-    /// Import name
-    import_name: String,
-    /// Source file
-    source: Option<PathBuf>,
-    /// Timestamp
-    timestamp: chrono::DateTime<chrono::Utc>,
-}
-
 impl HotReloadManager {
+    /// Parse Python imports from a line of code
+    fn parse_imports_from_line(line: &str) -> Vec<ImportStatement> {
+        let mut imports = Vec::new();
+        let line = line.trim();
+
+        // Skip comments and empty lines
+        if line.starts_with('#') || line.is_empty() {
+            return imports;
+        }
+
+        // Handle multiline imports with parentheses
+        if line.contains('(') && !line.contains(')') {
+            // This is a multiline import - it should be handled by the caller
+            return imports;
+        }
+
+        // Match 'from ... import ...' statements
+        if line.starts_with("from ") {
+            let from_re = Regex::new(r"^from\s+([.\w]+)\s+import\s+(.+)$").unwrap();
+            if let Some(caps) = from_re.captures(line) {
+                let from_path = caps.get(1).unwrap().as_str().to_string();
+                let imports_str = caps.get(2).unwrap().as_str();
+
+                // Handle multiple imports
+                let names: Vec<String> = imports_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+
+                if !names.is_empty() {
+                    imports.push(ImportStatement::with_names(
+                        names[0].clone(),
+                        names,
+                        from_path,
+                    ));
+                }
+            }
+        }
+        // Match 'import ...' statements
+        else if line.starts_with("import ") {
+            let import_re = Regex::new(r"^import\s+(.+)$").unwrap();
+            if let Some(caps) = import_re.captures(line) {
+                let modules = caps.get(1).unwrap().as_str();
+                
+                // Handle multiple imports and aliases
+                for module in modules.split(',') {
+                    let module = module.trim();
+                    if module.is_empty() {
+                        continue;
+                    }
+
+                    // Handle 'as' aliases
+                    let module_name = module.split_whitespace()
+                        .next()
+                        .unwrap_or(module)
+                        .to_string();
+
+                    imports.push(ImportStatement::new(module_name));
+                }
+            }
+        }
+
+        imports
+    }
+
+    /// Analyze Python file for imports
+    pub async fn analyze_file(&self, path: &Path) -> BlastResult<HashSet<String>> {
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(HotReloadError::from)?;
+
+        let mut imports = HashSet::new();
+        let mut in_multiline = false;
+        let mut multiline_buffer = String::new();
+
+        // Process the file line by line
+        for line in content.lines() {
+            let line = line.trim();
+
+            // Skip comments and empty lines
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+
+            // Handle multiline imports
+            if in_multiline {
+                multiline_buffer.push_str(line);
+                if line.contains(')') {
+                    // End of multiline import
+                    in_multiline = false;
+                    for import in Self::parse_imports_from_line(line) {
+                        imports.insert(import.get_package_name());
+                    }
+                    multiline_buffer.clear();
+                }
+                continue;
+            }
+
+            if line.contains('(') && !line.contains(')') {
+                // Start of multiline import
+                in_multiline = true;
+                multiline_buffer = line.to_string();
+                continue;
+            }
+
+            // Process single-line imports
+            for import in Self::parse_imports_from_line(line) {
+                imports.insert(import.get_package_name());
+            }
+        }
+
+        Ok(imports)
+    }
+
     /// Create new hot reload manager
     pub async fn new() -> BlastResult<Self> {
-        let (import_tx, mut import_rx) = mpsc::channel(1000);
         let environments = Arc::new(Mutex::new(HashMap::new()));
-        let import_cache = Arc::new(Mutex::new(HashMap::new()));
         let sync_manager = Arc::new(Mutex::new(SyncManager::new()));
 
-        // Create file system watcher
+        // Create file system watcher with environment reference
+        let env_ref = Arc::clone(&environments);
+        let sync_ref = Arc::clone(&sync_manager);
         let watcher = notify::recommended_watcher(move |res: Result<Event, _>| {
             if let Ok(event) = res {
                 debug!("File system event detected: {:?}", event);
-                // Handle file system events
+                if let EventKind::Create(_) | EventKind::Modify(_) = event.kind {
+                    if let Some(path) = event.paths.first() {
+                        if path.extension().map_or(false, |ext| ext == "py") {
+                            let env_clone = env_ref.clone();
+                            let sync_clone = sync_ref.clone();
+                            let path_clone = path.to_path_buf();
+                            tokio::spawn(async move {
+                                if let Err(e) = Self::handle_python_file_change(&env_clone, &sync_clone, &path_clone).await {
+                                    warn!("Failed to handle Python file change: {}", e);
+                                }
+                            });
+                        }
+                    }
+                }
             }
-        })?;
-
-        // Spawn import notification handler
-        let env_clone = environments.clone();
-        let cache_clone = import_cache.clone();
-        let sync_clone = sync_manager.clone();
-        
-        tokio::spawn(async move {
-            while let Some(notification) = import_rx.recv().await {
-                Self::handle_import_notification(
-                    &env_clone,
-                    &cache_clone,
-                    &sync_clone,
-                    notification
-                ).await.ok();
-            }
-        });
+        }).map_err(HotReloadError::from)?;
 
         Ok(Self {
             environments,
             watcher: Arc::new(Mutex::new(watcher)),
-            import_cache,
-            import_tx,
             sync_manager,
         })
     }
 
-    /// Handle import notification
-    async fn handle_import_notification(
+    /// Handle Python file changes
+    async fn handle_python_file_change(
         environments: &Arc<Mutex<HashMap<String, EnvironmentContext>>>,
-        import_cache: &Arc<Mutex<HashMap<String, ImportInfo>>>,
         sync_manager: &Arc<Mutex<SyncManager>>,
-        notification: ImportNotification,
+        path: &Path,
     ) -> BlastResult<()> {
-        let mut cache = import_cache.lock().await;
         let mut envs = environments.lock().await;
-
-        // Update import cache
-        let info = cache.entry(notification.import_name.clone()).or_insert_with(|| ImportInfo {
-            package: notification.import_name.clone(),
-            first_seen: notification.timestamp,
-            last_used: notification.timestamp,
-            usage_count: 0,
-            sources: HashSet::new(),
-        });
-
-        info.last_used = notification.timestamp;
-        info.usage_count += 1;
-        if let Some(source) = notification.source {
-            info.sources.insert(source);
-        }
-
-        // Update environment context
-        if let Some(context) = envs.get_mut(&notification.environment) {
-            context.active_imports.insert(notification.import_name);
-            
-            // Check if we need to sync versions
-            if context.last_sync.is_none() {
-                let mut sync_manager = sync_manager.lock().await;
-                let operation = sync_manager.plan_sync(
-                    &context.environment,
-                    &context.environment,
-                ).await?;
-                
-                context.last_sync = Some(operation.id.clone());
-                
-                // Apply sync in background
-                let sync_manager_clone = sync_manager.clone();
-                let operation_id = operation.id.clone();
-                let mut env_clone = context.environment.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = sync_manager_clone.apply_sync(&operation_id, &mut env_clone).await {
-                        warn!("Failed to apply sync operation: {}", e);
-                    }
-                });
+        
+        // Find environment containing this file
+        for context in envs.values_mut() {
+            if path.starts_with(context.environment.path()) {
+                // Check if we need to sync versions
+                if context.last_sync.is_none() {
+                    let sync_manager = Arc::clone(sync_manager);
+                    let operation = sync_manager.lock().await.plan_sync(
+                        &context.environment,
+                        &context.environment,
+                    ).await?;
+                    
+                    context.last_sync = Some(operation.id.clone());
+                    
+                    // Apply sync in background
+                    let operation_id = operation.id.clone();
+                    let mut env_clone = context.environment.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = sync_manager.lock().await.apply_sync(&operation_id, &mut env_clone).await {
+                            warn!("Failed to apply sync operation: {}", e);
+                        }
+                    });
+                }
+                break;
             }
         }
 
@@ -173,8 +298,6 @@ impl HotReloadManager {
         // Create context
         let context = EnvironmentContext {
             environment: env.clone(),
-            watched_paths: HashSet::new(),
-            active_imports: HashSet::new(),
             package_versions: HashMap::new(),
             last_sync: None,
         };
@@ -186,39 +309,9 @@ impl HotReloadManager {
         self.watcher.lock().await.watch(
             env.path(),
             RecursiveMode::Recursive,
-        )?;
+        ).map_err(HotReloadError::from)?;
 
         Ok(())
-    }
-
-    /// Analyze Python file for imports
-    pub async fn analyze_file(&self, path: &Path) -> BlastResult<HashSet<String>> {
-        let content = tokio::fs::read_to_string(path).await?;
-        let mut imports = HashSet::new();
-
-        // Parse Python file
-        if let Ok(ast) = ast::Suite::parse(&content) {
-            for stmt in ast.statements {
-                match stmt {
-                    ast::Statement::Import(import) => {
-                        for name in import.names {
-                            imports.insert(name.name);
-                        }
-                    }
-                    ast::Statement::ImportFrom(from_import) => {
-                        if let Some(module) = from_import.module {
-                            imports.insert(module);
-                        }
-                        for name in from_import.names {
-                            imports.insert(name.name);
-                        }
-                    }
-                    _ => continue,
-                }
-            }
-        }
-
-        Ok(imports)
     }
 
     /// Handle package installation detection
@@ -235,8 +328,8 @@ impl HotReloadManager {
         context.package_versions.insert(package.name().to_string(), package.version().clone());
 
         // Trigger version sync
-        let mut sync_manager = self.sync_manager.lock().await;
-        let operation = sync_manager.plan_sync(
+        let sync_manager = Arc::clone(&self.sync_manager);
+        let operation = sync_manager.lock().await.plan_sync(
             &context.environment,
             &context.environment,
         ).await?;
@@ -244,12 +337,10 @@ impl HotReloadManager {
         context.last_sync = Some(operation.id.clone());
 
         // Apply sync in background
-        let sync_manager_clone = sync_manager.clone();
         let operation_id = operation.id.clone();
         let mut env_clone = context.environment.clone();
-        
         tokio::spawn(async move {
-            if let Err(e) = sync_manager_clone.apply_sync(&operation_id, &mut env_clone).await {
+            if let Err(e) = sync_manager.lock().await.apply_sync(&operation_id, &mut env_clone).await {
                 warn!("Failed to apply sync operation: {}", e);
             }
         });
@@ -257,108 +348,9 @@ impl HotReloadManager {
         Ok(())
     }
 
-    /// Generate optimized import hook script
-    pub fn generate_import_hook(&self) -> String {
-        r#"
-import sys
-import os
-import threading
-import json
-import socket
-from importlib.abc import MetaPathFinder
-from typing import Optional, Sequence
-
-class BlastImportHook(MetaPathFinder):
-    def __init__(self):
-        self.imported = set()
-        self.lock = threading.Lock()
-        self.socket_path = os.environ.get('BLAST_SOCKET_PATH')
-        self._setup_ipc()
-
-    def _setup_ipc(self):
-        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        if self.socket_path:
-            try:
-                self.socket.connect(self.socket_path)
-            except:
-                print("Warning: Could not connect to Blast daemon")
-
-    def find_spec(self, fullname: str, path: Optional[Sequence[str]] = None, target: Optional[object] = None):
-        with self.lock:
-            if fullname not in self.imported:
-                self.imported.add(fullname)
-                self._notify_blast(fullname, path[0] if path else None)
-        return None
-
-    def _notify_blast(self, import_name: str, source: Optional[str] = None):
-        if not hasattr(self, 'socket'):
-            return
-
-        try:
-            data = {
-                'type': 'import',
-                'name': import_name,
-                'source': source,
-                'timestamp': import_time.isoformat() if (import_time := datetime.datetime.now(datetime.timezone.utc)) else None,
-                'environment': os.environ.get('BLAST_ENV_NAME', 'unnamed')
-            }
-            self.socket.sendall(json.dumps(data).encode())
-        except:
-            # Fail silently - we don't want to break imports if notification fails
-            pass
-
-# Install the import hook
-sys.meta_path.insert(0, BlastImportHook())
-        "#.to_string()
-    }
-
-    /// Start hot reload monitoring
+    /// Start monitoring for changes
     pub async fn start_monitoring(&self) -> BlastResult<()> {
-        let environments = self.environments.clone();
-        let import_cache = self.import_cache.clone();
-        let sync_manager = self.sync_manager.clone();
-
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-            
-            loop {
-                interval.tick().await;
-                
-                let envs = environments.lock().await;
-                for (name, context) in envs.iter() {
-                    // Check for new Python files
-                    if let Ok(entries) = tokio::fs::read_dir(context.environment.path()).await {
-                        for entry in entries {
-                            if let Ok(entry) = entry {
-                                if let Some(ext) = entry.path().extension() {
-                                    if ext == "py" {
-                                        // Analyze file for imports
-                                        if let Ok(imports) = Self::analyze_file(&entry.path()).await {
-                                            for import in imports {
-                                                // Send import notification
-                                                let notification = ImportNotification {
-                                                    environment: name.clone(),
-                                                    import_name: import,
-                                                    source: Some(entry.path()),
-                                                    timestamp: chrono::Utc::now(),
-                                                };
-                                                Self::handle_import_notification(
-                                                    &environments,
-                                                    &import_cache,
-                                                    &sync_manager,
-                                                    notification
-                                                ).await.ok();
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
+        // Implementation is handled by the file system watcher
         Ok(())
     }
 }
@@ -366,36 +358,45 @@ sys.meta_path.insert(0, BlastImportHook())
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
 
-    #[tokio::test]
-    async fn test_hot_reload() {
-        let manager = HotReloadManager::new().await.unwrap();
-        let temp_dir = tempdir().unwrap();
-        
-        // Create test environment
-        let env = PythonEnvironment::new(
-            temp_dir.path().to_path_buf(),
-            crate::python::PythonVersion::parse("3.8").unwrap(),
-        );
+    #[test]
+    fn test_parse_simple_import() {
+        let imports = HotReloadManager::parse_imports_from_line("import numpy");
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].module, "numpy");
+        assert!(!imports[0].is_from);
+    }
 
-        // Register environment
-        manager.register_environment(env).await.unwrap();
+    #[test]
+    fn test_parse_multiple_imports() {
+        let imports = HotReloadManager::parse_imports_from_line("import numpy, pandas, tensorflow");
+        assert_eq!(imports.len(), 3);
+        assert_eq!(imports[0].module, "numpy");
+        assert_eq!(imports[1].module, "pandas");
+        assert_eq!(imports[2].module, "tensorflow");
+    }
 
-        // Create test Python file
-        let test_file = temp_dir.path().join("test.py");
-        tokio::fs::write(&test_file, r#"
-import requests
-from pandas import DataFrame
-        "#).await.unwrap();
+    #[test]
+    fn test_parse_from_import() {
+        let imports = HotReloadManager::parse_imports_from_line("from numpy import array, zeros");
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].module, "array");
+        assert!(imports[0].is_from);
+        assert_eq!(imports[0].names, vec!["array", "zeros"]);
+        assert_eq!(imports[0].from_path, Some("numpy".to_string()));
+    }
 
-        // Analyze imports
-        let imports = manager.analyze_file(&test_file).await.unwrap();
-        assert!(imports.contains("requests"));
-        assert!(imports.contains("pandas"));
+    #[test]
+    fn test_parse_import_with_alias() {
+        let imports = HotReloadManager::parse_imports_from_line("import numpy as np");
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].module, "numpy");
+    }
 
-        // Generate import hook
-        let hook_script = manager.generate_import_hook();
-        assert!(hook_script.contains("BlastImportHook"));
+    #[test]
+    fn test_parse_nested_import() {
+        let imports = HotReloadManager::parse_imports_from_line("from tensorflow.keras import layers");
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].get_package_name(), "tensorflow");
     }
 } 

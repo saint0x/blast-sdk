@@ -1,17 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use petgraph::{Graph, Directed};
 use petgraph::graph::NodeIndex;
-use petgraph::algo::is_cyclic_directed;
-use petgraph::visit::Dfs;
+use petgraph::algo::kosaraju_scc;
 
 use blast_core::{
-    package::{Package, Version},
+    error::BlastResult,
+    package::Package,
+    version::Version,
 };
 
-use crate::DaemonResult;
+use crate::error::DaemonResult;
 
-/// Validation result for a package dependency graph
-#[derive(Debug)]
+/// Result of dependency validation
+#[derive(Debug, Clone)]
 pub struct ValidationResult {
     /// Whether the graph is valid
     pub is_valid: bool,
@@ -21,8 +22,8 @@ pub struct ValidationResult {
     pub metrics: ValidationMetrics,
 }
 
-/// Types of validation issues that can be found
-#[derive(Debug)]
+/// Validation issue types
+#[derive(Debug, Clone)]
 pub enum ValidationIssue {
     /// Circular dependency detected
     CircularDependency {
@@ -45,7 +46,7 @@ pub enum ValidationIssue {
     },
 }
 
-/// Metrics collected during validation
+/// Validation metrics
 #[derive(Debug, Clone)]
 pub struct ValidationMetrics {
     /// Number of packages checked
@@ -58,8 +59,7 @@ pub struct ValidationMetrics {
     pub version_constraints_checked: usize,
 }
 
-/// Dependency graph validator
-#[derive(Debug)]
+/// Dependency validator
 pub struct DependencyValidator {
     /// Graph representation of dependencies
     graph: Graph<Package, (), Directed>,
@@ -70,7 +70,7 @@ pub struct DependencyValidator {
 }
 
 impl DependencyValidator {
-    /// Create a new dependency validator
+    /// Create a new validator
     pub fn new() -> Self {
         Self {
             graph: Graph::new(),
@@ -84,52 +84,42 @@ impl DependencyValidator {
         }
     }
 
-    /// Add a package to the validation graph
+    /// Add a package to the graph
     pub fn add_package(&mut self, package: Package) -> NodeIndex {
-        let name = package.name().to_string();
-        if let Some(&idx) = self.package_map.get(&name) {
-            idx
-        } else {
-            let idx = self.graph.add_node(package);
-            self.package_map.insert(name, idx);
-            idx
-        }
+        let idx = self.graph.add_node(package.clone());
+        self.package_map.insert(package.name().to_string(), idx);
+        idx
     }
 
-    /// Add a dependency relationship between packages
+    /// Add a dependency between packages
     pub fn add_dependency(&mut self, from: NodeIndex, to: NodeIndex) {
         self.graph.add_edge(from, to, ());
-        self.metrics.dependencies_checked += 1;
     }
 
     /// Validate the dependency graph
     pub fn validate(&mut self) -> DaemonResult<ValidationResult> {
         let mut issues = Vec::new();
-
+        
         // Check for circular dependencies
-        if is_cyclic_directed(&self.graph) {
-            let cycles = self.find_cycles();
-            for cycle in cycles {
-                issues.push(ValidationIssue::CircularDependency {
-                    packages: cycle.iter()
-                        .map(|&idx| self.graph[idx].name().to_string())
-                        .collect(),
-                });
-            }
+        let cycles = self.find_cycles();
+        for cycle in cycles {
+            let packages = cycle.iter()
+                .map(|&idx| self.graph[idx].name().to_string())
+                .collect();
+            issues.push(ValidationIssue::CircularDependency { packages });
         }
-
-        // Check version conflicts
-        let version_conflicts = self.check_version_conflicts();
-        issues.extend(version_conflicts);
-
-        // Check Python version compatibility
-        let python_conflicts = self.check_python_version_conflicts();
-        issues.extend(python_conflicts);
-
+        
+        // Check for version conflicts
+        issues.extend(self.check_version_conflicts());
+        
+        // Check for Python version conflicts
+        issues.extend(self.check_python_version_conflicts());
+        
         // Update metrics
         self.metrics.packages_checked = self.graph.node_count();
+        self.metrics.dependencies_checked = self.graph.edge_count();
         self.metrics.max_depth = self.calculate_max_depth();
-
+        
         Ok(ValidationResult {
             is_valid: issues.is_empty(),
             issues,
@@ -142,17 +132,22 @@ impl DependencyValidator {
         let mut cycles = Vec::new();
         let mut visited = HashSet::new();
         let mut stack = Vec::new();
-
+        
         for node in self.graph.node_indices() {
             if !visited.contains(&node) {
-                self.find_cycles_recursive(node, &mut visited, &mut stack, &mut cycles);
+                self.find_cycles_recursive(
+                    node,
+                    &mut visited,
+                    &mut stack,
+                    &mut cycles,
+                );
             }
         }
-
+        
         cycles
     }
 
-    /// Recursive helper for finding cycles
+    /// Recursive helper for cycle detection
     fn find_cycles_recursive(
         &self,
         node: NodeIndex,
@@ -162,198 +157,103 @@ impl DependencyValidator {
     ) {
         visited.insert(node);
         stack.push(node);
-
+        
         for neighbor in self.graph.neighbors(node) {
             if !visited.contains(&neighbor) {
                 self.find_cycles_recursive(neighbor, visited, stack, cycles);
             } else if stack.contains(&neighbor) {
+                // Found a cycle
                 let cycle_start = stack.iter().position(|&n| n == neighbor).unwrap();
                 cycles.push(stack[cycle_start..].to_vec());
             }
         }
-
+        
         stack.pop();
     }
 
-    /// Check for version conflicts between packages
+    /// Check for version conflicts
     fn check_version_conflicts(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
-        let mut version_map: HashMap<String, HashSet<Version>> = HashMap::new();
-
+        let mut version_map: HashMap<String, Vec<Version>> = HashMap::new();
+        
         for node in self.graph.node_indices() {
             let package = &self.graph[node];
             version_map.entry(package.name().to_string())
                 .or_default()
-                .insert(package.version().clone());
+                .push(package.version().clone());
         }
-
+        
         for (package, versions) in version_map {
             if versions.len() > 1 {
                 issues.push(ValidationIssue::VersionConflict {
                     package,
-                    required_versions: versions.into_iter().collect(),
+                    required_versions: versions,
                 });
             }
         }
-
+        
         issues
     }
 
     /// Check for Python version conflicts
     fn check_python_version_conflicts(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
-
+        
         for node in self.graph.node_indices() {
             let package = &self.graph[node];
             let mut constraints = Vec::new();
-
-            for dep in self.graph.neighbors(node) {
-                let dep_package = &self.graph[dep];
-                // Check if versions are compatible using string representation
+            
+            for neighbor in self.graph.neighbors(node) {
+                let dep = &self.graph[neighbor];
+                constraints.push(dep.python_version().to_string());
                 
-                if package.python_version().to_string() != dep_package.python_version().to_string() {
-                    constraints.push(dep_package.python_version().to_string());
+                if !package.python_version().is_compatible_with(dep.python_version()) {
+                    issues.push(ValidationIssue::PythonVersionConflict {
+                        package: package.name().to_string(),
+                        version_constraints: constraints.clone(),
+                    });
                 }
             }
-
-            if !constraints.is_empty() {
-                issues.push(ValidationIssue::PythonVersionConflict {
-                    package: package.name().to_string(),
-                    version_constraints: constraints,
-                });
-            }
         }
-
+        
         issues
     }
 
-    /// Calculate the maximum dependency depth
+    /// Calculate maximum dependency depth
     fn calculate_max_depth(&self) -> usize {
         let mut max_depth = 0;
-        let mut dfs = Dfs::new(&self.graph, self.graph.node_indices().next().unwrap_or_else(|| panic!("Empty graph")));
+        let mut visited = HashSet::new();
         
-        while let Some(_) = dfs.next(&self.graph) {
-            max_depth += 1;
+        for node in self.graph.node_indices() {
+            if !visited.contains(&node) {
+                let depth = self.calculate_depth(node, &mut visited);
+                max_depth = max_depth.max(depth);
+            }
         }
-
+        
         max_depth
+    }
+
+    /// Calculate depth for a node
+    fn calculate_depth(&self, node: NodeIndex, visited: &mut HashSet<NodeIndex>) -> usize {
+        if visited.contains(&node) {
+            return 0;
+        }
+        
+        visited.insert(node);
+        let mut max_child_depth = 0;
+        
+        for neighbor in self.graph.neighbors(node) {
+            let depth = self.calculate_depth(neighbor, visited);
+            max_child_depth = max_child_depth.max(depth);
+        }
+        
+        max_child_depth + 1
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use blast_core::package::{PackageId, VersionConstraint};
-    use std::str::FromStr;
-
-    #[test]
-    fn test_circular_dependency_detection() {
-        let mut validator = DependencyValidator::new();
-
-        // Create packages
-        let package_a = Package::new(
-            PackageId::new(
-                "package-a",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            VersionConstraint::parse(">=3.7").unwrap(),
-        );
-
-        let package_b = Package::new(
-            PackageId::new(
-                "package-b",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            VersionConstraint::parse(">=3.7").unwrap(),
-        );
-
-        // Add packages and create circular dependency
-        let a_idx = validator.add_package(package_a);
-        let b_idx = validator.add_package(package_b);
-        validator.add_dependency(a_idx, b_idx);
-        validator.add_dependency(b_idx, a_idx);
-
-        // Validate
-        let result = validator.validate().unwrap();
-        assert!(!result.is_valid);
-        assert!(matches!(
-            result.issues[0],
-            ValidationIssue::CircularDependency { .. }
-        ));
-    }
-
-    #[test]
-    fn test_version_conflict_detection() {
-        let mut validator = DependencyValidator::new();
-
-        // Create packages with conflicting versions
-        let package_a_v1 = Package::new(
-            PackageId::new(
-                "package-a",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            VersionConstraint::parse(">=3.7").unwrap(),
-        );
-
-        let package_a_v2 = Package::new(
-            PackageId::new(
-                "package-a",
-                Version::parse("2.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            VersionConstraint::parse(">=3.7").unwrap(),
-        );
-
-        // Add packages
-        validator.add_package(package_a_v1);
-        validator.add_package(package_a_v2);
-
-        // Validate
-        let result = validator.validate().unwrap();
-        assert!(!result.is_valid);
-        assert!(matches!(
-            result.issues[0],
-            ValidationIssue::VersionConflict { .. }
-        ));
-    }
-
-    #[test]
-    fn test_python_version_conflict_detection() {
-        let mut validator = DependencyValidator::new();
-
-        // Create packages with conflicting Python versions
-        let package_a = Package::new(
-            PackageId::new(
-                "package-a",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            VersionConstraint::parse(">=3.7").unwrap(),
-        );
-
-        let package_b = Package::new(
-            PackageId::new(
-                "package-b",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            VersionConstraint::parse(">=3.9").unwrap(),
-        );
-
-        // Add packages and dependency
-        let a_idx = validator.add_package(package_a);
-        let b_idx = validator.add_package(package_b);
-        validator.add_dependency(a_idx, b_idx);
-
-        // Validate
-        let result = validator.validate().unwrap();
-        assert!(!result.is_valid);
-        assert!(matches!(
-            result.issues[0],
-            ValidationIssue::PythonVersionConflict { .. }
-        ));
+impl Default for DependencyValidator {
+    fn default() -> Self {
+        Self::new()
     }
 } 

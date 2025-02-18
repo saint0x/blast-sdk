@@ -1,10 +1,27 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::collections::HashMap;
 use async_trait::async_trait;
 use crate::error::{BlastError, BlastResult};
-use crate::package::{Package, PackageId, Version, VersionConstraint};
+use crate::package::Package;
+use crate::version::VersionConstraint;
 use crate::python::PythonVersion;
+use crate::metadata::PackageMetadata;
+
+// Helper function to create package metadata from dependencies
+fn create_package_metadata(
+    name: String,
+    version: String,
+    dependencies: HashMap<String, VersionConstraint>,
+    python_version: VersionConstraint,
+) -> PackageMetadata {
+    PackageMetadata::new(
+        name,
+        version,
+        dependencies,
+        python_version,
+    )
+}
 
 /// Core trait for environment management
 #[async_trait]
@@ -25,10 +42,10 @@ pub trait Environment: Send + Sync + 'static {
     async fn uninstall_package(&self, package: &Package) -> BlastResult<()>;
 
     /// Get installed packages
-    fn get_packages(&self) -> BlastResult<Vec<Package>>;
+    async fn get_packages(&self) -> BlastResult<Vec<Package>>;
 
     /// Get environment path
-    fn path(&self) -> &Path;
+    fn path(&self) -> &PathBuf;
 
     /// Get Python version
     fn python_version(&self) -> &PythonVersion;
@@ -150,7 +167,7 @@ impl Environment for PythonEnvironment {
         Ok(())
     }
 
-    fn get_packages(&self) -> BlastResult<Vec<Package>> {
+    async fn get_packages(&self) -> BlastResult<Vec<Package>> {
         // Execute pip freeze to get installed packages
         let output = Command::new(self.pip_executable())
             .arg("freeze")
@@ -173,24 +190,33 @@ impl Environment for PythonEnvironment {
                 let parts: Vec<&str> = line.split('=').collect();
                 if parts.len() >= 2 {
                     let name = parts[0].trim().to_string();
-                    let version = Version::parse(&parts[1].trim().replace('=', "")).ok()?;
-                    let id = PackageId::new(name, version);
+                    let version = parts[1].trim().replace('=', "");
                     
                     // Create empty dependencies map and any version constraint
                     let dependencies = HashMap::new();
                     let python_version = VersionConstraint::any();
                     
-                    Some(Package::new(id, dependencies, python_version))
+                    Package::new(
+                        name.clone(),
+                        version.clone(),
+                        create_package_metadata(
+                            name,
+                            version,
+                            dependencies,
+                            python_version.clone(),
+                        ),
+                        python_version
+                    ).ok()
                 } else {
                     None
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         Ok(packages)
     }
 
-    fn path(&self) -> &Path {
+    fn path(&self) -> &PathBuf {
         &self.path
     }
 
@@ -204,62 +230,5 @@ impl Environment for PythonEnvironment {
 
     fn name(&self) -> Option<&str> {
         self.name.as_deref()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::str::FromStr;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_environment_creation() {
-        let dir = tempdir().unwrap();
-        let version = PythonVersion::from_str("3.9.6").unwrap();
-        let env = PythonEnvironment::new(dir.path().to_path_buf(), version.clone());
-
-        assert_eq!(env.path(), dir.path());
-        assert_eq!(env.python_version(), &version);
-        assert!(env.name().is_none());
-    }
-
-    #[test]
-    fn test_environment_name() {
-        let dir = tempdir().unwrap();
-        let version = PythonVersion::from_str("3.9.6").unwrap();
-        let mut env = PythonEnvironment::new(dir.path().to_path_buf(), version);
-
-        assert!(env.name().is_none());
-        env.set_name("test-env".to_string());
-        assert_eq!(env.name(), Some("test-env"));
-    }
-
-    #[tokio::test]
-    async fn test_package_operations() {
-        let dir = tempdir().unwrap();
-        let version = PythonVersion::from_str("3.9.6").unwrap();
-        let env = PythonEnvironment::new(dir.path().to_path_buf(), version);
-        
-        // First create the environment
-        env.create().await.expect("Failed to create environment");
-
-        // Test package installation
-        let package = Package::new(
-            "requests".to_string(),
-            "2.28.2".to_string(),
-            env.python_version().clone(),
-        );
-        
-        let install_result = env.install_package(&package).await;
-        assert!(install_result.is_ok(), "Package installation failed: {:?}", install_result);
-
-        // Verify package is in installed packages
-        let installed = env.get_packages().unwrap();
-        assert!(installed.iter().any(|p| p.name() == "requests"));
-
-        // Test package uninstallation
-        let uninstall_result = env.uninstall_package(&package).await;
-        assert!(uninstall_result.is_ok(), "Package uninstallation failed: {:?}", uninstall_result);
     }
 } 

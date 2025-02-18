@@ -7,36 +7,37 @@ description = "Core types and traits for the Blast Python environment manager"
 license = "MIT"
 
 [features]
-default = ["serde"]
-serde = ["dep:serde", "dep:serde_json", "dep:toml"]
+default = ["serde-support"]
+serde-support = ["dep:serde", "dep:serde_json", "dep:toml", "chrono/serde"]
 
 [dependencies]
-# Error handling
-thiserror = { workspace = true }
-anyhow = { workspace = true }
-
-# Serialization
-serde = { workspace = true, features = ["derive"], optional = true }
+tokio = { version = "1.36", features = ["full"] }
+async-trait = "0.1"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
-toml = { workspace = true, optional = true }
+serde_yaml = "0.9"
+toml = { version = "0.8", optional = true }
+chrono = { version = "0.4", features = ["serde"] }
+glob = "0.3"
+petgraph = "0.6"
+
+# Error handling
+anyhow = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json", "chrono"] }
 
 # Version handling
 semver = { version = "1.0", features = ["serde"] }
 
 # Async
-tokio = { workspace = true }
-async-trait = { workspace = true }
-
-# Time handling
-chrono = { version = "0.4", features = ["serde"] }
+futures = { version = "0.3", features = ["executor"] }
 
 # Filesystem
 dirs = "5.0"
-glob = "0.3"
+notify = "6.1"
 
 # Pattern matching
 regex = "1.10"
@@ -44,6 +45,15 @@ regex = "1.10"
 # UUID generation
 uuid = { version = "1.6", features = ["v4", "serde"] }
 
+# UI components
+termcolor = "1.4"
+indicatif = "0.17"
+console = "0.15"
+
 [dev-dependencies]
 proptest = { workspace = true }
 mockall = { workspace = true }
+tempfile = "3.10"
+tokio-test = "0.4"
+assert_fs = "1.1"
+predicates = "3.1"

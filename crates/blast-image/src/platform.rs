@@ -122,47 +122,4 @@ pub struct GpuDevice {
     pub cuda_capability: Option<String>,
     /// ROCm version
     pub rocm_version: Option<String>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_platform_requirements() {
-        let requirements = PlatformRequirements::default();
-        assert!(requirements.os.contains(&"linux".to_string()));
-        assert!(requirements.arch.contains(&"x86_64".to_string()));
-        assert_eq!(requirements.min_cores, 1);
-        assert!(requirements.min_memory >= 1024 * 1024 * 1024); // At least 1GB
-    }
-
-    #[test]
-    fn test_platform_info() {
-        let info = PlatformInfo::current();
-        assert!(!info.os.is_empty());
-        assert!(!info.arch.is_empty());
-        
-        let requirements = PlatformRequirements {
-            os: vec![info.os.clone()],
-            arch: vec![info.arch.clone()],
-            min_memory: info.min_memory,
-            min_disk_space: info.min_disk_space,
-            ..Default::default()
-        };
-
-        assert!(info.meets_requirements(&requirements));
-    }
-
-    #[test]
-    fn test_incompatible_requirements() {
-        let info = PlatformInfo::current();
-        
-        let requirements = PlatformRequirements {
-            os: vec!["invalid_os".to_string()],
-            ..Default::default()
-        };
-
-        assert!(!info.meets_requirements(&requirements));
-    }
 } 

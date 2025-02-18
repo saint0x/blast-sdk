@@ -2,11 +2,11 @@ use blast_core::{
     config::BlastConfig,
     error::BlastResult,
 };
-use blast_daemon::Daemon;
+use blast_daemon::{Daemon, DaemonConfig};
 use tracing::{debug, info};
 
 /// Execute the clean command
-pub async fn execute(_config: &BlastConfig) -> BlastResult<()> {
+pub async fn execute(config: &BlastConfig) -> BlastResult<()> {
     debug!("Cleaning environment");
 
     // Check if we're in a blast environment
@@ -19,28 +19,35 @@ pub async fn execute(_config: &BlastConfig) -> BlastResult<()> {
     };
 
     // Create daemon configuration
-    let daemon_config = blast_daemon::DaemonConfig {
+    let daemon_config = DaemonConfig {
         max_pending_updates: 100,
+        max_snapshot_age_days: 7,
+        env_path: config.project_root.join("environments/default"),
+        cache_path: config.project_root.join("cache"),
     };
 
     // Connect to existing daemon
     let daemon = Daemon::new(daemon_config).await?;
 
-    // Get active environment
-    if let Some(env) = daemon.get_active_environment().await? {
+    // Get current environment state
+    let state_manager = daemon.state_manager();
+    let state_guard = state_manager.read().await;
+    let current_state = state_guard.get_current_state().await?;
+
+    if current_state.is_active() {
         info!("Cleaning environment: {}", env_name);
         
-        // Save current state for recovery if needed
-        daemon.save_environment_state(&env).await?;
+        // Create a Python environment instance
+        let env = blast_core::python::PythonEnvironment::new(
+            config.project_root.join("environments").join(&env_name),
+            current_state.python_version.clone(),
+        );
         
-        // Remove all packages
+        // Clean the environment
         daemon.clean_environment(&env).await?;
         
         // Reinitialize environment
         daemon.reinitialize_environment(&env).await?;
-        
-        // Restore essential packages
-        daemon.restore_essential_packages(&env).await?;
 
         info!("Environment cleaned and reinitialized");
     } else {

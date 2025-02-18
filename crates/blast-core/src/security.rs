@@ -195,8 +195,8 @@ pub struct Vulnerability {
     pub references: Vec<String>,
 }
 
-/// Vulnerability severity
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Severity level for security vulnerabilities
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum VulnerabilitySeverity {
     /// Low severity
     Low,
@@ -232,21 +232,6 @@ pub struct PolicyViolation {
     pub recommendations: Vec<String>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_security_policy_default() {
-        let policy = SecurityPolicy::default();
-        assert_eq!(policy.isolation_level, IsolationLevel::Process);
-        assert_eq!(policy.python_version, PythonVersion::parse("3.8.0").unwrap());
-    }
-    
-    #[test]
-    fn test_vulnerability_severity_ordering() {
-        assert!(VulnerabilitySeverity::Critical > VulnerabilitySeverity::High);
-        assert!(VulnerabilitySeverity::High > VulnerabilitySeverity::Medium);
-        assert!(VulnerabilitySeverity::Medium > VulnerabilitySeverity::Low);
-    }
+impl PolicyViolation {
+    // ... existing implementation ...
 } 

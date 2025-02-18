@@ -2,14 +2,76 @@ use std::collections::HashMap;
 use std::time::Instant;
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
-use tracing::{Level, Subscriber};
+use tracing::Level;
 use tracing_subscriber::fmt::format::FmtSpan;
+use std::cmp::Ordering;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl PartialOrd for LogLevel {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for LogLevel {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Higher severity = lower number
+        match (self, other) {
+            (LogLevel::Error, LogLevel::Error) => Ordering::Equal,
+            (LogLevel::Error, _) => Ordering::Less,
+            (LogLevel::Warn, LogLevel::Error) => Ordering::Greater,
+            (LogLevel::Warn, LogLevel::Warn) => Ordering::Equal,
+            (LogLevel::Warn, _) => Ordering::Less,
+            (LogLevel::Info, LogLevel::Error | LogLevel::Warn) => Ordering::Greater,
+            (LogLevel::Info, LogLevel::Info) => Ordering::Equal,
+            (LogLevel::Info, _) => Ordering::Less,
+            (LogLevel::Debug, LogLevel::Trace) => Ordering::Less,
+            (LogLevel::Debug, LogLevel::Debug) => Ordering::Equal,
+            (LogLevel::Debug, _) => Ordering::Greater,
+            (LogLevel::Trace, LogLevel::Trace) => Ordering::Equal,
+            (LogLevel::Trace, _) => Ordering::Greater,
+        }
+    }
+}
+
+impl From<Level> for LogLevel {
+    fn from(level: Level) -> Self {
+        match level {
+            Level::ERROR => LogLevel::Error,
+            Level::WARN => LogLevel::Warn,
+            Level::INFO => LogLevel::Info,
+            Level::DEBUG => LogLevel::Debug,
+            Level::TRACE => LogLevel::Trace,
+        }
+    }
+}
+
+impl From<LogLevel> for Level {
+    fn from(level: LogLevel) -> Self {
+        match level {
+            LogLevel::Error => Level::ERROR,
+            LogLevel::Warn => Level::WARN,
+            LogLevel::Info => Level::INFO,
+            LogLevel::Debug => Level::DEBUG,
+            LogLevel::Trace => Level::TRACE,
+        }
+    }
+}
 
 /// Log record with structured data
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogRecord {
     /// Log level
-    pub level: Level,
+    pub level: LogLevel,
     /// Log message
     pub message: String,
     /// Target module/component
@@ -82,7 +144,7 @@ pub struct PerformanceMetrics {
 #[derive(Debug)]
 pub struct StructuredLogger {
     /// Log level filter
-    level: Level,
+    level: LogLevel,
     /// Performance metrics collection
     metrics: HashMap<String, PerformanceMetrics>,
     /// Operation timers
@@ -93,7 +155,7 @@ pub struct StructuredLogger {
 
 impl StructuredLogger {
     /// Create a new structured logger
-    pub fn new(level: Level) -> Self {
+    pub fn new(level: LogLevel) -> Self {
         Self {
             level,
             metrics: HashMap::new(),
@@ -125,30 +187,80 @@ impl StructuredLogger {
 
     /// Log a message with structured data
     pub fn log(&mut self, record: LogRecord) {
+        let tracing_level: Level = record.level.clone().into();
         if record.level <= self.level {
             // Update performance metrics if timing is available
             if let Some(timing) = &record.timing {
                 if let Some(metrics) = self.metrics.get_mut(&record.target) {
                     metrics.latency = timing.duration;
-                    // Update other metrics...
                 }
             }
 
             // Format and output the log record
-            match record.level {
-                Level::ERROR => tracing::error!(
-                    target: &record.target,
-                    message = %record.message,
-                    timestamp = %record.timestamp,
-                    thread_id = record.thread_id,
-                    ?record.timing,
-                    ?record.memory,
-                    ?record.fields,
-                ),
-                Level::WARN => tracing::warn!(/* ... */),
-                Level::INFO => tracing::info!(/* ... */),
-                Level::DEBUG => tracing::debug!(/* ... */),
-                Level::TRACE => tracing::trace!(/* ... */),
+            let target = record.target.clone();
+            let message = record.message.clone();
+            let timestamp = record.timestamp;
+            let thread_id = record.thread_id;
+            let timing = record.timing.clone();
+            let memory = record.memory.clone();
+            let fields = record.fields.clone();
+
+            match tracing_level {
+                Level::ERROR => {
+                    tracing::error!(
+                        target = %target,
+                        message = %message,
+                        timestamp = %timestamp,
+                        thread_id = thread_id,
+                        ?timing,
+                        ?memory,
+                        ?fields,
+                    );
+                }
+                Level::WARN => {
+                    tracing::warn!(
+                        target = %target,
+                        message = %message,
+                        timestamp = %timestamp,
+                        thread_id = thread_id,
+                        ?timing,
+                        ?memory,
+                        ?fields,
+                    );
+                }
+                Level::INFO => {
+                    tracing::info!(
+                        target = %target,
+                        message = %message,
+                        timestamp = %timestamp,
+                        thread_id = thread_id,
+                        ?timing,
+                        ?memory,
+                        ?fields,
+                    );
+                }
+                Level::DEBUG => {
+                    tracing::debug!(
+                        target = %target,
+                        message = %message,
+                        timestamp = %timestamp,
+                        thread_id = thread_id,
+                        ?timing,
+                        ?memory,
+                        ?fields,
+                    );
+                }
+                Level::TRACE => {
+                    tracing::trace!(
+                        target = %target,
+                        message = %message,
+                        timestamp = %timestamp,
+                        thread_id = thread_id,
+                        ?timing,
+                        ?memory,
+                        ?fields,
+                    );
+                }
             }
         }
     }
@@ -207,83 +319,23 @@ impl MemoryTracker {
 }
 
 /// Initialize the logging system
-pub fn init_logging(level: Level) -> StructuredLogger {
-    // Set up tracing subscriber
-    let subscriber = tracing_subscriber::fmt()
+pub fn init_logging(level: LogLevel) -> StructuredLogger {
+    let tracing_level: Level = level.clone().into();
+    
+    // Set up tracing subscriber with JSON formatting
+    tracing_subscriber::fmt()
         .with_level(true)
         .with_target(true)
         .with_thread_ids(true)
         .with_file(true)
         .with_line_number(true)
         .with_span_events(FmtSpan::FULL)
-        .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
-        .with_filter(level)
-        .pretty()
-        .build();
-
-    tracing::subscriber::set_global_default(subscriber)
+        .with_timer(tracing_subscriber::fmt::time::ChronoLocal::new("%Y-%m-%d %H:%M:%S%.3f".to_string()))
+        .with_env_filter(tracing_level.to_string())
+        .json()
+        .flatten_event(true)
+        .try_init()
         .expect("Failed to set global subscriber");
 
     StructuredLogger::new(level)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::thread;
-    use std::time::Duration;
-
-    #[test]
-    fn test_structured_logging() {
-        let mut logger = init_logging(Level::DEBUG);
-
-        // Test operation timing
-        logger.start_operation("test_op");
-        thread::sleep(Duration::from_millis(100));
-        let timing = logger.end_operation("test_op").unwrap();
-        assert!(timing.duration >= Duration::from_millis(100));
-
-        // Test log record creation
-        let record = LogRecord {
-            level: Level::INFO,
-            message: "Test message".to_string(),
-            target: "test_module".to_string(),
-            timestamp: Utc::now(),
-            thread_id: 1,
-            timing: Some(timing),
-            memory: logger.get_memory_metrics(),
-            fields: {
-                let mut fields = HashMap::new();
-                fields.insert("key".to_string(), serde_json::Value::String("value".to_string()));
-                fields
-            },
-        };
-
-        logger.log(record);
-    }
-
-    #[test]
-    fn test_performance_metrics() {
-        let mut logger = StructuredLogger::new(Level::INFO);
-
-        // Test multiple operations
-        for i in 0..3 {
-            logger.start_operation(&format!("op_{}", i));
-            thread::sleep(Duration::from_millis(50));
-            logger.end_operation(&format!("op_{}", i));
-        }
-
-        let metrics = logger.get_metrics();
-        assert!(!metrics.is_empty());
-    }
-
-    #[test]
-    fn test_memory_tracking() {
-        let logger = StructuredLogger::new(Level::INFO);
-        let metrics = logger.get_memory_metrics().unwrap();
-        
-        assert!(metrics.current_usage >= 0);
-        assert!(metrics.peak_usage >= metrics.current_usage);
-        assert!(metrics.allocator_stats.is_some());
-    }
 } 

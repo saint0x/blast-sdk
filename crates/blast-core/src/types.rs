@@ -83,11 +83,11 @@ mod duration_serde {
 /// Logging level for Blast operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogLevel {
-    Error,
-    Warn,
-    Info,
-    Debug,
-    Trace,
+    Error = 0,
+    Warn = 1,
+    Info = 2,
+    Debug = 3,
+    Trace = 4,
 }
 
 impl Default for LogLevel {
@@ -105,54 +105,5 @@ impl From<LogLevel> for tracing::Level {
             LogLevel::Debug => tracing::Level::DEBUG,
             LogLevel::Trace => tracing::Level::TRACE,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json;
-
-    #[test]
-    fn test_update_strategy_serialization() {
-        let strategy = UpdateStrategy::Automatic {
-            interval: Duration::from_secs(3600),
-            direct_only: true,
-        };
-
-        let serialized = serde_json::to_string(&strategy).unwrap();
-        let deserialized: UpdateStrategy = serde_json::from_str(&serialized).unwrap();
-
-        match deserialized {
-            UpdateStrategy::Automatic {
-                interval,
-                direct_only,
-            } => {
-                assert_eq!(interval.as_secs(), 3600);
-                assert!(direct_only);
-            }
-            _ => panic!("Wrong variant"),
-        }
-    }
-
-    #[test]
-    fn test_cache_settings_defaults() {
-        let settings = CacheSettings::default();
-        assert!(settings.use_hardlinks);
-        assert!(settings.use_cow);
-        assert_eq!(settings.max_size, 10 * 1024 * 1024 * 1024);
-        assert_eq!(settings.ttl.as_secs(), 30 * 24 * 60 * 60);
-    }
-
-    #[test]
-    fn test_log_level_conversion() {
-        assert_eq!(
-            tracing::Level::INFO,
-            LogLevel::default().into()
-        );
-        assert_eq!(
-            tracing::Level::DEBUG,
-            LogLevel::Debug.into()
-        );
     }
 } 

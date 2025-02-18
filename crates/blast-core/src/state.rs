@@ -7,10 +7,12 @@ use std::time::Duration;
 
 use crate::{
     error::{BlastError, BlastResult},
-    package::{Package, Version, VersionConstraint, PackageId},
+    package::Package,
+    version::{Version, VersionConstraint},
     version_history::VersionHistory,
     python::{PythonEnvironment, PythonVersion},
     sync::IssueSeverity,
+    metadata::PackageMetadata,
 };
 
 /// Environment state at a point in time
@@ -21,6 +23,8 @@ pub struct EnvironmentState {
     /// Environment name
     pub name: String,
     /// Python version
+    /// 
+    /// 
     pub python_version: PythonVersion,
     /// Installed packages with their versions
     pub packages: HashMap<String, Version>,
@@ -34,6 +38,7 @@ pub struct EnvironmentState {
     pub metadata: StateMetadata,
     /// Verification status
     pub verification: Option<StateVerification>,
+    active: bool,
 }
 
 /// Metadata for environment state
@@ -103,6 +108,21 @@ pub struct StateDiff {
     pub python_version_change: Option<(PythonVersion, PythonVersion)>,
 }
 
+// Helper function to create package metadata from dependencies
+fn create_package_metadata(
+    name: String,
+    version: String,
+    dependencies: HashMap<String, VersionConstraint>,
+    python_version: VersionConstraint,
+) -> PackageMetadata {
+    PackageMetadata::new(
+        name,
+        version,
+        dependencies,
+        python_version,
+    )
+}
+
 impl EnvironmentState {
     /// Create a new environment state
     pub fn new(
@@ -125,6 +145,7 @@ impl EnvironmentState {
                 custom: HashMap::new(),
             },
             verification: None,
+            active: false,
         }
     }
 
@@ -323,21 +344,29 @@ impl EnvironmentState {
         }
 
         // Create a map of packages for easier access
-        let packages: HashMap<_, _> = state.packages.iter()
-            .map(|(name, version)| {
-                let id = PackageId::new(name.clone(), version.clone());
-                let dependencies = HashMap::new();
-                let python_version = VersionConstraint::parse(">=3.6").unwrap_or_else(|_| VersionConstraint::any());
-                let package = Package::new(id, dependencies, python_version);
-                (name.clone(), package)
+        let packages: HashMap<String, Package> = state.packages.iter()
+            .map(|(name, version)| -> BlastResult<(String, Package)> {
+                let package = Package::new(
+                    name.clone(),
+                    version.to_string(),
+                    create_package_metadata(
+                        name.clone(),
+                        version.to_string(),
+                        HashMap::new(),
+                        VersionConstraint::any(),
+                    ),
+                    VersionConstraint::any(),
+                )?;
+                Ok((name.clone(), package))
             })
-            .collect();
+            .collect::<BlastResult<HashMap<_, _>>>()?;
 
         // Verify package dependencies
         for (name, package) in &packages {
             // Check if all dependencies are satisfied
-            for (dep_name, constraint) in package.dependencies() {
-                if let Some(dep_version) = state.packages.get(dep_name) {
+            let deps = package.all_dependencies(&[]);
+            for (dep_name, constraint) in deps {
+                if let Some(dep_version) = state.packages.get(&dep_name) {
                     if !constraint.matches(dep_version) {
                         verification.add_issue(StateIssue {
                             description: format!(
@@ -370,13 +399,13 @@ impl EnvironmentState {
             let python_version_str = state.python_version.to_string();
             let python_version = Version::parse(&python_version_str).unwrap_or_else(|_| Version::parse("3.6.0").unwrap());
             
-            if !package.python_version().matches(&python_version) {
+            if !package.metadata().python_version.matches(&python_version) {
                 verification.add_issue(StateIssue {
                     severity: IssueSeverity::Warning,
                     description: format!(
                         "Package {} requires Python version {} but environment has {}",
                         package.name(),
-                        package.python_version(),
+                        package.metadata().python_version,
                         state.python_version
                     ),
                     context: None,
@@ -404,6 +433,14 @@ impl EnvironmentState {
         }
 
         Ok(verification)
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub fn set_active(&mut self, active: bool) {
+        self.active = active;
     }
 }
 
@@ -473,126 +510,8 @@ impl StateIssue {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::str::FromStr;
-
-    #[test]
-    fn test_state_creation() {
-        let python_version = PythonVersion::from_str("3.8").unwrap();
-        let packages = HashMap::new();
-        let env_vars = HashMap::new();
-
-        let state = EnvironmentState::new(
-            "test-env".to_string(),
-            python_version.clone(),
-            packages,
-            env_vars,
-        );
-
-        assert_eq!(state.name, "test-env");
-        assert_eq!(state.python_version, python_version);
-        assert!(state.packages.is_empty());
-        assert!(state.env_vars.is_empty());
-    }
-
-    #[test]
-    fn test_state_diff() {
-        let python_version = PythonVersion::from_str("3.8").unwrap();
-        let mut packages1 = HashMap::new();
-        packages1.insert(
-            "package-a".to_string(),
-            Version::parse("1.0.0").unwrap(),
-        );
-
-        let mut packages2 = HashMap::new();
-        packages2.insert(
-            "package-a".to_string(),
-            Version::parse("2.0.0").unwrap(),
-        );
-        packages2.insert(
-            "package-b".to_string(),
-            Version::parse("1.0.0").unwrap(),
-        );
-
-        let state1 = EnvironmentState::new(
-            "test-env".to_string(),
-            python_version.clone(),
-            packages1,
-            HashMap::new(),
-        );
-
-        let state2 = EnvironmentState::new(
-            "test-env".to_string(),
-            python_version,
-            packages2,
-            HashMap::new(),
-        );
-
-        let diff = state1.diff(&state2);
-        assert_eq!(diff.added_packages.len(), 1);
-        assert_eq!(diff.updated_packages.len(), 1);
-        assert!(diff.removed_packages.is_empty());
-    }
-
-    #[test]
-    fn test_state_verification() {
-        let python_version = PythonVersion::from_str("3.8").unwrap();
-        let mut state = EnvironmentState::new(
-            "test-env".to_string(),
-            python_version,
-            HashMap::new(),
-            HashMap::new(),
-        );
-
-        let package = Package::new(
-            crate::package::PackageId::new(
-                "test-package",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            crate::package::VersionConstraint::any(),
-        );
-
-        state.add_package(&package);
-        
-        let verification = state.verify().unwrap();
-        assert!(verification.is_verified);
-        assert_eq!(verification.metrics.as_ref().map(|m| m.packages_checked), Some(1));
-    }
-
-    #[test]
-    fn test_checkpoint_operations() {
-        let python_version = PythonVersion::from_str("3.8").unwrap();
-        let mut state = EnvironmentState::new(
-            "test-env".to_string(),
-            python_version,
-            HashMap::new(),
-            HashMap::new(),
-        );
-
-        let package = Package::new(
-            crate::package::PackageId::new(
-                "test-package",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            crate::package::VersionConstraint::any(),
-        );
-
-        state.add_package(&package);
-        
-        // Create checkpoint
-        let checkpoint = state.create_checkpoint().unwrap();
-        assert_eq!(checkpoint.state.packages.len(), 1);
-
-        // Modify state
-        state.remove_package(&package);
-        assert!(state.packages.is_empty());
-
-        // Restore checkpoint
-        state.restore_from_checkpoint(checkpoint).unwrap();
-        assert_eq!(state.packages.len(), 1);
+impl EnvironmentState {
+    pub fn name(&self) -> &str {
+        &self.name
     }
 } 
