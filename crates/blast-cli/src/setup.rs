@@ -3,10 +3,79 @@ use blast_core::error::{BlastResult, BlastError};
 use crate::shell::Shell;
 use tracing::{info, debug};
 
-const SHELL_FUNCTION: &str = r#"
+const BASH_ZSH_FUNCTION: &str = r#"
 # Blast environment manager shell integration
 blast() {
-    eval "$(blast-cli start "$@")"
+    if [ "$1" = "start" ]; then
+        # Get the actual blast binary path
+        local blast_bin
+        if ! blast_bin=$(command -v blast); then
+            echo "Error: blast binary not found in PATH" >&2
+            return 1
+        fi
+
+        local temp_file
+        temp_file=$(mktemp)
+        if "$blast_bin" "$@" > "$temp_file"; then
+            . "$temp_file"
+            rm -f "$temp_file"
+        else
+            rm -f "$temp_file"
+            return 1
+        fi
+    else
+        command blast "$@"
+    fi
+}
+"#;
+
+const FISH_FUNCTION: &str = r#"
+# Blast environment manager shell integration
+function blast
+    if test "$argv[1]" = "start"
+        # Get the actual blast binary path
+        set -l blast_bin (command -s blast)
+        if test -z "$blast_bin"
+            echo "Error: blast binary not found in PATH" >&2
+            return 1
+        end
+
+        set -l temp_file (mktemp)
+        if "$blast_bin" $argv > $temp_file
+            source $temp_file
+            rm -f $temp_file
+        else
+            rm -f $temp_file
+            return 1
+        end
+    else
+        command blast $argv
+    end
+end
+"#;
+
+const POWERSHELL_FUNCTION: &str = r#"
+# Blast environment manager shell integration
+function blast {
+    if ($args[0] -eq "start") {
+        # Get the actual blast binary path
+        $blast_bin = Get-Command blast -ErrorAction SilentlyContinue
+        if (-not $blast_bin) {
+            Write-Error "Error: blast binary not found in PATH"
+            return $false
+        }
+
+        $temp_file = [System.IO.Path]::GetTempFileName()
+        if (& $blast_bin.Path @args > $temp_file) {
+            . $temp_file
+            Remove-Item $temp_file
+        } else {
+            Remove-Item $temp_file
+            return $false
+        }
+    } else {
+        & (Get-Command blast).Path @args
+    }
 }
 "#;
 
@@ -48,6 +117,9 @@ impl ShellSetup {
         // Add shell integration
         self.add_shell_integration()?;
         info!("Added blast shell integration to {}", self.config_file.display());
+        info!("To complete setup, please either:");
+        info!("    1. Restart your shell, or");
+        info!("    2. Run: {}", self.get_shell_reload_command());
         
         Ok(true)
     }
@@ -76,8 +148,15 @@ impl ShellSetup {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Add our shell function
-        content.push_str(SHELL_FUNCTION);
+        // Add shell-specific function
+        let shell_function = match self.shell {
+            Shell::Bash | Shell::Zsh => BASH_ZSH_FUNCTION,
+            Shell::Fish => FISH_FUNCTION,
+            Shell::PowerShell => POWERSHELL_FUNCTION,
+            Shell::Unknown => return Err(BlastError::Config("Unsupported shell".to_string())),
+        };
+
+        content.push_str(shell_function);
         std::fs::write(&self.config_file, content)?;
 
         Ok(())
@@ -100,8 +179,9 @@ pub fn initialize() -> BlastResult<()> {
     
     if setup.ensure_shell_integration()? {
         info!("Blast shell integration has been configured.");
-        info!("To activate the changes, please run:");
-        info!("    {}", setup.get_shell_reload_command());
+        info!("To complete setup, please either:");
+        info!("    1. Restart your shell, or");
+        info!("    2. Run: {}", setup.get_shell_reload_command());
     }
 
     Ok(())

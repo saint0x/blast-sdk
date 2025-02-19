@@ -5,6 +5,7 @@ use blast_core::{
     shell_scripts::ActivationScripts,
 };
 use serde::{Serialize, Deserialize};
+use std::io::Write;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellState {
@@ -117,7 +118,11 @@ impl EnvironmentActivator {
     }
 
     pub fn generate_activation_script(&self) -> String {
+        // Temporarily disable colored output for activation script
+        std::env::set_var("NO_COLOR", "1");
         let scripts = ActivationScripts::generate(&self.env_path, &self.env_name);
+        std::env::remove_var("NO_COLOR");
+        
         match self.shell {
             Shell::Bash | Shell::Zsh => scripts.bash,
             Shell::Fish => scripts.fish,
@@ -176,5 +181,267 @@ impl EnvironmentActivator {
 
     pub fn shell(&self) -> &Shell {
         &self.shell
+    }
+
+    pub fn generate_shell_function(&self) -> String {
+        match self.shell {
+            Shell::Bash | Shell::Zsh => r#"
+# Blast environment manager integration
+blast() {
+    if [ "$1" = "start" ]; then
+        # Create a unique temporary file based on PID
+        local temp_file="/tmp/blast_${$}_$(date +%s)"
+        
+        # Run blast and capture output
+        if command blast "$@" > "$temp_file" 2>&1; then
+            # Source the file if it contains activation script
+            if grep -q "BLAST_ENV_NAME" "$temp_file" && grep -q "deactivate()" "$temp_file"; then
+                . "$temp_file"
+                rm -f "$temp_file"
+                return 0
+            else
+                cat "$temp_file"
+                rm -f "$temp_file"
+                return 1
+            fi
+        else
+            cat "$temp_file"
+            rm -f "$temp_file"
+            return 1
+        fi
+    else
+        command blast "$@"
+    fi
+}
+"#.trim().to_string(),
+            Shell::Fish => r#"
+function blast
+    # Prevent recursion
+    if set -q BLAST_RECURSION_CHECK
+        echo "Error: Detected recursive blast activation" >&2
+        return 1
+    end
+    set -x BLAST_RECURSION_CHECK 1
+
+    # Safety mechanism: limit subshell depth
+    set -q SHLVL; or set SHLVL 1
+    if test $SHLVL -gt 20
+        echo "Error: Shell nesting level too deep ($SHLVL)" >&2
+        set -e BLAST_RECURSION_CHECK
+        return 1
+    end
+
+    if test "$argv[1]" = "start"
+        # Get blast binary path
+        set -l blast_bin (command -v blast)
+        if test $status -ne 0
+            echo "Error: blast binary not found in PATH" >&2
+            set -e BLAST_RECURSION_CHECK
+            return 1
+        end
+
+        # Create temp files with cleanup
+        set -l temp_file (mktemp)
+        set -l log_file (mktemp)
+        
+        function cleanup --on-event fish_exit
+            rm -f "$temp_file" "$log_file"
+            set -e BLAST_RECURSION_CHECK
+        end
+
+        # Safety mechanism: timeout
+        if command -v timeout >/dev/null 2>&1
+            if not timeout 30s $blast_bin $argv > $temp_file 2> $log_file
+                if test $status -eq 124
+                    echo "Error: Command timed out after 30 seconds" >&2
+                end
+                cat $log_file >&2
+                cleanup
+                return 1
+            end
+        else
+            if not $blast_bin $argv > $temp_file 2> $log_file
+                cat $log_file >&2
+                cleanup
+                return 1
+            end
+        end
+
+        # Verify activation script
+        if grep -q "BLAST_ENV_NAME" $temp_file; and grep -q "deactivate" $temp_file
+            # Safety mechanism: check script size
+            set -l script_size (wc -l < $temp_file)
+            if test $script_size -gt 1000
+                echo "Error: Activation script too large ($script_size lines)" >&2
+                cleanup
+                return 1
+            end
+
+            source $temp_file
+            set -l exit_code $status
+            
+            if test -s "$log_file"
+                cat "$log_file" >&2
+            end
+            
+            cleanup
+            return $exit_code
+        else
+            cat "$log_file" >&2
+            cat "$temp_file" >&2
+            cleanup
+            return 1
+        end
+    else
+        command blast $argv
+        set -l exit_code $status
+        set -e BLAST_RECURSION_CHECK
+        return $exit_code
+    end
+end
+"#.trim().to_string(),
+            Shell::PowerShell => r#"
+function blast {
+    param([Parameter(ValueFromRemainingArguments=$true)]$args)
+    
+    # Prevent recursion
+    if ($env:BLAST_RECURSION_CHECK) {
+        Write-Error "Error: Detected recursive blast activation"
+        return 1
+    }
+    $env:BLAST_RECURSION_CHECK = 1
+
+    # Safety mechanism: check call stack depth
+    if ((Get-PSCallStack).Count -gt 20) {
+        Write-Error "Error: PowerShell call stack too deep"
+        $env:BLAST_RECURSION_CHECK = $null
+        return 1
+    }
+
+    try {
+        if ($args[0] -eq "start") {
+            # Get blast binary path
+            $blast_bin = Get-Command blast -ErrorAction SilentlyContinue
+            if (-not $blast_bin) {
+                Write-Error "Error: blast binary not found in PATH"
+                return 1
+            }
+
+            # Create temp files
+            $temp_file = [System.IO.Path]::GetTempFileName()
+            $log_file = [System.IO.Path]::GetTempFileName()
+
+            try {
+                # Safety mechanism: timeout
+                $timeoutSeconds = 30
+                $processStartTime = Get-Date
+                
+                $process = Start-Process -FilePath $blast_bin.Path -ArgumentList $args `
+                    -RedirectStandardOutput $temp_file -RedirectStandardError $log_file `
+                    -NoNewWindow -PassThru
+
+                # Wait with timeout
+                if (-not $process.WaitForExit($timeoutSeconds * 1000)) {
+                    $process.Kill()
+                    Write-Error "Error: Command timed out after $timeoutSeconds seconds"
+                    return 1
+                }
+
+                if ($process.ExitCode -eq 0) {
+                    # Verify activation script
+                    $content = Get-Content $temp_file -Raw
+                    if ($content -match "BLAST_ENV_NAME" -and $content -match "deactivate") {
+                        # Safety mechanism: check script size
+                        $scriptLines = @(Get-Content $temp_file).Count
+                        if ($scriptLines -gt 1000) {
+                            Write-Error "Error: Activation script too large ($scriptLines lines)"
+                            return 1
+                        }
+
+                        # Source the script
+                        . $temp_file
+                        
+                        # Show any warnings/info
+                        if (Test-Path $log_file) {
+                            Get-Content $log_file | Write-Warning
+                        }
+                        
+                        return $LASTEXITCODE
+                    } else {
+                        Get-Content $log_file | Write-Error
+                        Get-Content $temp_file | Write-Error
+                        return 1
+                    }
+                } else {
+                    Get-Content $log_file | Write-Error
+                    return $process.ExitCode
+                }
+            }
+            finally {
+                if (Test-Path $temp_file) { Remove-Item -Force $temp_file }
+                if (Test-Path $log_file) { Remove-Item -Force $log_file }
+                $env:BLAST_RECURSION_CHECK = $null
+            }
+        } else {
+            & $blast_bin.Path $args
+            return $LASTEXITCODE
+        }
+    }
+    catch {
+        Write-Error $_.Exception.Message
+        return 1
+    }
+    finally {
+        $env:BLAST_RECURSION_CHECK = $null
+    }
+}
+"#.trim().to_string(),
+            Shell::Unknown => "# Unsupported shell detected".to_string(),
+        }
+    }
+
+    pub fn install_shell_function(&self) -> BlastResult<()> {
+        let function_code = self.generate_shell_function();
+        let home_dir = dirs::home_dir().ok_or_else(|| {
+            blast_core::error::BlastError::Environment("Home directory not found".to_string())
+        })?;
+
+        let rc_file = match self.shell {
+            Shell::Bash => home_dir.join(".bashrc"),
+            Shell::Zsh => home_dir.join(".zshrc"),
+            Shell::Fish => home_dir.join(".config/fish/config.fish"),
+            Shell::PowerShell => home_dir.join(if cfg!(windows) {
+                "Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1"
+            } else {
+                ".config/powershell/Microsoft.PowerShell_profile.ps1"
+            }),
+            Shell::Unknown => return Ok(()),
+        };
+
+        // Create parent directories if they don't exist
+        if let Some(parent) = rc_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Read current content
+        let mut current_content = std::fs::read_to_string(&rc_file).unwrap_or_default();
+
+        // Remove existing blast function if present
+        if let Some(start) = current_content.find("# Blast environment manager") {
+            if let Some(end) = current_content[start..].find("\n\n") {
+                current_content.replace_range(start..start + end + 2, "");
+            }
+        }
+
+        // Write the new function
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(&rc_file)?;
+
+        write!(file, "{}\n\n# Blast environment manager integration\n{}\n", current_content.trim(), function_code)?;
+
+        Ok(())
     }
 } 

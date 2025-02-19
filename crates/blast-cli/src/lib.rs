@@ -3,26 +3,38 @@
 use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::error;
 use once_cell::sync::OnceCell;
 
 use blast_core::config::BlastConfig;
 use blast_core::python::PythonVersion;
 
 mod commands;
-mod output;
+pub mod output;
 mod progress;
 pub mod shell;
-mod setup;
+pub mod setup;
+mod environment;
 
 pub use commands::*;
 pub use output::*;
 pub use progress::*;
+pub use setup::initialize;
 
 static LOGGING: OnceCell<()> = OnceCell::new();
 
 fn init_logging(eval_mode: bool) {
     let _ = LOGGING.get_or_init(|| {
+        // If we're in script output mode, don't initialize logging at all
+        if std::env::var("BLAST_SCRIPT_OUTPUT").is_ok() {
+            return;
+        }
+
+        // Ensure no color output
+        std::env::set_var("NO_COLOR", "1");
+        std::env::set_var("CLICOLOR", "0");
+        std::env::set_var("CLICOLOR_FORCE", "0");
+        std::env::set_var("RUST_LOG_STYLE", "never");
+
         let builder = tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::from_default_env()
@@ -31,30 +43,20 @@ fn init_logging(eval_mode: bool) {
                     } else {
                         tracing::Level::DEBUG.into()
                     })
-            );
+            )
+            .with_ansi(false)
+            .with_target(false)
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .with_file(false)
+            .with_line_number(false)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_timer(())
+            .with_writer(std::io::stderr)
+            .with_level(false);
 
-        // Configure based on mode
-        let builder = if eval_mode {
-            builder
-                .with_target(false)
-                .with_ansi(false)
-                .with_thread_ids(false)
-                .with_thread_names(false)
-                .with_file(false)
-                .with_line_number(false)
-                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
-        } else {
-            builder
-                .with_target(false)
-                .with_ansi(true)
-                .with_thread_ids(true)
-                .with_thread_names(true)
-                .with_file(true)
-                .with_line_number(true)
-                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::ACTIVE)
-        };
-
-        builder.try_init().expect("Failed to initialize logging");
+        // Try to initialize, but don't panic if it fails
+        let _ = builder.try_init();
     });
 }
 
@@ -76,7 +78,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Start a new blast environment (stacks if one exists)
+    /// Start a new blast environment
     Start {
         /// Python version to use
         #[arg(short, long)]
@@ -105,29 +107,53 @@ pub enum Commands {
     /// Clean and reinstall all dependencies
     Clean,
 
-    /// Save environment image
+    /// Save environment state
     Save {
-        /// Image name
+        /// State name
         #[arg(short, long)]
         name: Option<String>,
     },
 
-    /// Load environment image
+    /// Load environment state
     Load {
-        /// Image name
+        /// State name
         #[arg(short, long)]
         name: Option<String>,
     },
 
-    /// List all environments from most to least recently used
+    /// List all environments
     List,
 
-    /// Check environment status and health
+    /// Check environment status
     Check,
 }
 
 /// Run the CLI application
 pub async fn run() -> Result<()> {
+    // If we're in script output mode, skip all initialization
+    if std::env::var("BLAST_SCRIPT_OUTPUT").is_ok() {
+        let cli = Cli::parse();
+        match cli.command {
+            Commands::Start {
+                python,
+                name,
+                path,
+                env,
+            } => {
+                let current_dir = std::env::current_dir()?;
+                let config = BlastConfig::new(
+                    current_dir.file_name().unwrap().to_string_lossy().to_string(),
+                    "0.1.0",
+                    PythonVersion::parse("3.8")?,
+                    current_dir,
+                );
+                commands::execute_start(python, name, path, env, &config).await?;
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
     let cli = Cli::parse();
 
     // Initialize logging
@@ -207,6 +233,11 @@ fn mark_as_initialized() -> Result<()> {
 
 /// Main entry point for the CLI binary
 pub fn main() {
+    // Ensure no ANSI colors in output
+    std::env::set_var("NO_COLOR", "1");
+    std::env::set_var("CLICOLOR", "0");
+    std::env::set_var("CLICOLOR_FORCE", "0");
+
     // Initialize logging with default settings
     init_logging(false);
 
@@ -214,7 +245,7 @@ pub fn main() {
         .unwrap()
         .block_on(run())
     {
-        error!("Error: {}", e);
+        eprintln!("Error: {}", e);
         std::process::exit(1);
     }
 } 

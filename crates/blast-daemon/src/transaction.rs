@@ -151,7 +151,7 @@ impl Clone for TransactionManager {
 }
 
 impl TransactionManager {
-    pub fn new(initial_state: EnvironmentState) -> Self {
+    pub fn new(_initial_state: EnvironmentState) -> Self {
         let state_manager = StateManager::new(PathBuf::from("environments/default"));
         let state_manager = RwLock::new(state_manager);
         

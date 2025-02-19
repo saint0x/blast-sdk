@@ -80,7 +80,9 @@ impl StateManager {
         // Try to load existing state
         tokio::spawn(async move {
             if let Err(e) = instance.load_state().await {
-                tracing::error!("Failed to load state: {}", e);
+                if std::env::var("BLAST_SCRIPT_OUTPUT").is_err() {
+                    eprintln!("Failed to load state: {}", e);
+                }
             }
         });
 

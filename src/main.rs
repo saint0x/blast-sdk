@@ -1,11 +1,10 @@
 use anyhow::Result;
 use blast_cli;
-use tracing::{info, error, debug, Level};
+use tracing::{info, error, debug, Level, warn};
 use tracing_subscriber::{FmtSubscriber, EnvFilter};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tokio::sync::watch;
 use std::sync::Arc;
-use tokio::sync::Mutex as TokioMutex;
 use std::sync::RwLock;
 use std::sync::Once;
 
@@ -15,6 +14,12 @@ static LOGGING_INIT: Once = Once::new();
 async fn main() -> Result<()> {
     let eval_mode = std::env::var("BLAST_EVAL").is_ok();
     init_logging(eval_mode);
+
+    // Always try to ensure shell integration is set up
+    if let Err(e) = blast_cli::initialize() {
+        warn!("Failed to set up shell integration: {}", e);
+        warn!("You may need to manually add shell integration. See documentation for details.");
+    }
 
     if eval_mode {
         info!("Initializing blast environment...");
@@ -98,7 +103,7 @@ async fn main() -> Result<()> {
             daemon.start_background().await?;
             
             debug!("Setting up cleanup handlers");
-            let (shutdown_tx, shutdown_rx) = watch::channel(false);
+            let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
             // Start the daemon in a truly detached way
             tokio::spawn(async move {

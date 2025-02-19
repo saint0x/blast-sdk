@@ -1,16 +1,15 @@
 use std::path::PathBuf;
+use std::io::Write;
 use blast_core::{
     config::BlastConfig,
     error::BlastResult,
     python::PythonVersion,
     security::{SecurityPolicy, IsolationLevel, ResourceLimits},
-    Version,
 };
 use blast_daemon::{Daemon, DaemonConfig};
-use tracing::{debug, info, warn};
 use uuid::Uuid;
 use crate::shell::EnvironmentActivator;
-use std::collections::HashMap;
+use crate::environment::Environment;
 use tokio::process::Command;
 
 /// Execute the start command
@@ -21,52 +20,33 @@ pub async fn execute(
     env_vars: Vec<String>,
     config: &BlastConfig,
 ) -> BlastResult<()> {
-    // If BLAST_EVAL is set, we're in the activation phase
-    if std::env::var("BLAST_EVAL").is_ok() {
-        return handle_activation_phase(name, path, config).await;
+    // Check if we're in the final script output phase
+    if std::env::var("BLAST_SCRIPT_OUTPUT").is_ok() {
+        // Disable all output except the script
+        std::env::set_var("NO_COLOR", "1");
+        std::env::set_var("CLICOLOR", "0");
+        std::env::set_var("CLICOLOR_FORCE", "0");
+        std::env::set_var("RUST_LOG", "off");
+
+        let env_path = path.unwrap_or_else(|| config.env_path());
+        let activate_script = env_path.join("bin").join("activate");
+        
+        if !activate_script.exists() {
+            return Err(blast_core::error::BlastError::Environment(
+                "Activation script not found".to_string()
+            ));
+        }
+
+        // Read and output the script directly
+        let script_content = std::fs::read_to_string(&activate_script)?;
+        print!("{}", script_content); // Use print! instead of write_all for cleaner output
+        std::io::stdout().flush()?;
+        
+        return Ok(());
     }
 
-    // Otherwise, we're in the setup phase
+    // If we're not in script output mode, we're in the initial setup phase
     handle_setup_phase(python, name, path, env_vars, config).await
-}
-
-/// Handle the activation phase - outputs shell script for environment activation
-async fn handle_activation_phase(
-    name: Option<String>,
-    path: Option<PathBuf>,
-    config: &BlastConfig,
-) -> BlastResult<()> {
-    let env_path = path.unwrap_or_else(|| config.env_path());
-    let env_name = name.unwrap_or_else(|| {
-        env_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-    });
-
-    let activator = EnvironmentActivator::new(env_path, env_name);
-    
-    // Ensure daemon is running
-    if !activator.is_daemon_running() {
-        // Initialize and start daemon
-        let daemon_config = DaemonConfig {
-            max_pending_updates: 100,
-            max_snapshot_age_days: 7,
-            env_path: activator.env_path().to_path_buf(),
-            cache_path: config.project_root.join("cache"),
-        };
-
-        let daemon = Daemon::new(daemon_config).await?;
-        start_background(&daemon).await?;
-    }
-
-    // Save shell state
-    activator.save_state()?;
-
-    // Output activation script
-    println!("{}", activator.generate_activation_script());
-    Ok(())
 }
 
 /// Handle the setup phase - creates the environment and starts the daemon
@@ -77,21 +57,22 @@ async fn handle_setup_phase(
     env_vars: Vec<String>,
     config: &BlastConfig,
 ) -> BlastResult<()> {
-    debug!("Starting environment creation");
+    eprintln!("Creating new Blast environment");
     
     // Check if we're already in a blast environment
     if let Ok(current_env) = std::env::var("BLAST_ENV_NAME") {
-        warn!("Already in blast environment: {}", current_env);
+        eprintln!("Warning: Already in blast environment: {}", current_env);
+        eprintln!("Action Required: Run 'blast kill' first to deactivate");
         return Ok(());
     }
+
+    // Clone values early to avoid ownership issues
+    let name_for_cmd = name.clone();
+    let path_for_cmd = path.clone();
     
     // Resolve environment path
     let env_path = path.unwrap_or_else(|| config.env_path());
-    if !env_path.exists() {
-        debug!("Creating environment directory");
-        std::fs::create_dir_all(&env_path)?;
-    }
-
+    
     // Resolve environment name
     let env_name = name.unwrap_or_else(|| {
         env_path
@@ -107,7 +88,21 @@ async fn handle_setup_phase(
         .transpose()?
         .unwrap_or_else(|| config.python_version.clone());
 
-    debug!("Creating environment with Python {}", python_version);
+    eprintln!("Environment Configuration");
+    eprintln!("Name: {}", env_name);
+    eprintln!("Python Version: {}", python_version);
+    eprintln!("Location: {}", env_path.display());
+
+    // Create the environment structure
+    eprintln!("Creating Environment");
+    eprintln!("Setting up directory structure");
+    let environment = Environment::new(
+        env_path.clone(),
+        env_name.clone(),
+        python_version.clone(),
+    );
+    environment.create()?;
+    eprintln!("Done");
 
     // Create daemon configuration
     let daemon_config = DaemonConfig {
@@ -117,8 +112,10 @@ async fn handle_setup_phase(
         cache_path: config.project_root.join("cache"),
     };
 
-    // Initialize daemon
+    eprintln!("Initializing Services");
+    eprintln!("Starting daemon");
     let daemon = Daemon::new(daemon_config).await?;
+    eprintln!("Done");
     
     // Create security policy
     let security_policy = SecurityPolicy {
@@ -126,78 +123,93 @@ async fn handle_setup_phase(
         python_version: python_version.clone(),
         resource_limits: ResourceLimits::default(),
     };
-
-    // Create environment
+    
+    eprintln!("Creating Python environment");
     let env = daemon.create_environment(&security_policy).await?;
-    debug!("Created Python environment at {}", env.path().display());
+    eprintln!("Done");
+
+    eprintln!("Setting Up State");
+    eprintln!("Initializing state manager");
+    let state_manager = daemon.state_manager();
+    state_manager.write().await.load().await?;
+    eprintln!("Done");
 
     // Create environment state
-    let env_vars: HashMap<String, Version> = env_vars
-        .into_iter()
-        .filter_map(|var| {
-            let parts: Vec<&str> = var.split('=').collect();
-            if parts.len() == 2 {
-                Version::parse(parts[1]).ok().map(|version| (parts[0].to_string(), version))
-            } else {
-                None
-            }
-        })
-        .collect();
-
     let env_state = blast_core::state::EnvironmentState::new(
         env_name.clone(),
         python_version.clone(),
-        env_vars,
+        env_vars.into_iter()
+            .filter_map(|var| {
+                let parts: Vec<&str> = var.split('=').collect();
+                if parts.len() == 2 {
+                    blast_core::Version::parse("0.1.0")
+                        .ok()
+                        .map(|version| (parts[0].to_string(), version))
+                } else {
+                    None
+                }
+            })
+            .collect(),
         Default::default(),
     );
 
-    // Get state manager and ensure it's loaded
-    let state_manager = daemon.state_manager();
-    state_manager.write().await.load().await?;
-
-    // Add environment to state manager
+    eprintln!("Saving environment state");
     state_manager.write().await.add_environment(env_name.clone(), env_state.clone()).await?;
-    debug!("Added environment to state manager");
+    eprintln!("Done");
 
-    // Set as active environment
-    state_manager.write().await.set_active_environment(
-        env_name.clone(),
-        env.path().to_path_buf(),
-        python_version.clone(),
-    ).await?;
-    debug!("Set as active environment");
-
-    // Create initial checkpoint
+    eprintln!("Creating initial checkpoint");
     state_manager.write().await.create_checkpoint(
         Uuid::new_v4(),
         "Initial environment creation".to_string(),
         None,
     ).await?;
-    debug!("Created initial checkpoint");
+    eprintln!("Done");
 
     // Create and save shell state
     let activator = EnvironmentActivator::new(
         env.path().to_path_buf(),
         env_name.clone(),
     );
+
+    eprintln!("Saving shell state");
     activator.save_state()?;
+    eprintln!("Done");
 
-    info!("Environment ready: {} (Python {})", env_name, python_version);
-
-    // Start daemon in background
+    eprintln!("Starting Background Services");
+    eprintln!("Starting daemon process");
     start_background(&daemon).await?;
+    eprintln!("Done");
 
-    // Re-execute with BLAST_EVAL set to get shell activation
+    eprintln!("Activating Environment");
+
+    // Get the activation script
     let current_exe = std::env::current_exe()?;
-    let mut cmd = Command::new(current_exe);
-    cmd.arg("start")
-        .env("BLAST_EVAL", "1")
-        .env("BLAST_ENV_NAME", env_name)
-        .env("BLAST_ENV_PATH", env.path());
+    let mut script_cmd = Command::new(current_exe);
+    script_cmd.arg("start")
+        .env("BLAST_SCRIPT_OUTPUT", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
 
-    let output = cmd.output().await?;
-    println!("{}", String::from_utf8_lossy(&output.stdout));
+    if let Some(n) = name_for_cmd {
+        script_cmd.arg("--name").arg(n);
+    }
+    if let Some(p) = path_for_cmd {
+        script_cmd.arg("--path").arg(p);
+    }
 
+    let script_output = script_cmd.output().await?;
+    if !script_output.status.success() {
+        eprintln!("Failed to generate activation script");
+        return Err(blast_core::error::BlastError::Environment(
+            "Failed to generate activation script".to_string()
+        ));
+    }
+
+    // Write script to stdout for shell function to source
+    std::io::stdout().write_all(&script_output.stdout)?;
+    std::io::stdout().flush()?;
+
+    eprintln!("Environment ready!");
     Ok(())
 }
 
@@ -211,7 +223,7 @@ async fn start_background(daemon: &Daemon) -> BlastResult<()> {
         let exe_path = std::env::current_exe()?;
         
         // Create command to run daemon in background
-        let mut cmd = Command::new(exe_path);
+        let mut cmd = Command::new(&exe_path);
         cmd.arg("daemon")
            .env("BLAST_DAEMON", "1")
            .stdin(std::process::Stdio::null())
@@ -230,6 +242,19 @@ async fn start_background(daemon: &Daemon) -> BlastResult<()> {
         // Write PID to file if available
         if let Some(pid) = child.id() {
             std::fs::write(&pid_file, pid.to_string())?;
+            
+            // Verify the daemon started
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if !pid_file.exists() {
+                return Err(blast_core::error::BlastError::Environment(
+                    "Failed to start daemon process".to_string()
+                ));
+            }
+            
+            // Log daemon start if not in script output mode
+            if std::env::var("BLAST_SCRIPT_OUTPUT").is_err() {
+                eprintln!("Started daemon process with PID {}", pid);
+            }
         }
 
         // Don't wait for child, let it run in background
@@ -238,9 +263,6 @@ async fn start_background(daemon: &Daemon) -> BlastResult<()> {
             // Clean up PID file when process exits
             let _ = std::fs::remove_file(&pid_file);
         });
-
-        // Brief pause to ensure daemon is started
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     
     Ok(())

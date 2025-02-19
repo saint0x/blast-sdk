@@ -3,6 +3,14 @@ use blast_core::{
     error::BlastResult,
 };
 use tracing::info;
+use crate::shell::EnvironmentActivator;
+
+#[cfg(unix)]
+use nix::sys::signal::{kill, Signal};
+#[cfg(unix)]
+use nix::unistd::Pid;
+
+#[cfg(windows)]
 use std::process::Command;
 
 /// Execute the kill command
@@ -21,8 +29,6 @@ pub async fn execute(
                 // Kill the daemon process
                 #[cfg(unix)]
                 {
-                    use nix::sys::signal::{kill, Signal};
-                    use nix::unistd::Pid;
                     // First try SIGTERM
                     let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
                     // Give it a moment to clean up
@@ -43,33 +49,11 @@ pub async fn execute(
         let _ = std::fs::remove_file(&pid_file);
     }
 
-    // Clean up environment variables
-    std::env::remove_var("BLAST_ENV_NAME");
-    std::env::remove_var("BLAST_ENV_PATH");
-    std::env::remove_var("BLAST_SOCKET_PATH");
-    std::env::remove_var("BLAST_DAEMON");
-    std::env::remove_var("BLAST_EVAL");
-
-    // Kill any running terminal processes
-    if let Ok(ppid) = std::env::var("PPID") {
-        if let Ok(ppid) = ppid.parse::<i32>() {
-            #[cfg(unix)]
-            {
-                use nix::sys::signal::{kill, Signal};
-                use nix::unistd::Pid;
-                let _ = kill(Pid::from_raw(ppid), Signal::SIGTERM);
-            }
-        }
-    }
-
-    // Restore shell prompt
-    if let Ok(shell) = std::env::var("SHELL") {
-        if shell.contains("bash") || shell.contains("zsh") {
-            println!("PS1=\"${{PS1#\\(blast\\) }}\"");
-        } else if shell.contains("fish") {
-            println!("functions -e fish_prompt; functions -c _old_fish_prompt fish_prompt");
-        }
-    }
+    // Create activator to get deactivation script
+    let activator = EnvironmentActivator::new(env_path.clone(), env_name.clone());
+    
+    // Output deactivation script
+    print!("{}", activator.generate_deactivation_script());
 
     info!("Killed blast environment:");
     info!("  Name: {}", env_name);
