@@ -6,7 +6,10 @@ Blast is a modern Python environment manager designed to provide a more robust a
 
 ## Core Features
 
-- **Isolated Python Environments**: Create and manage isolated Python environments with their own dependencies
+- **Containerized Python Environments**: Create and manage isolated, containerized Python environments with their own dependencies and state
+- **Two-Layer Sync Architecture**: 
+  - Environment State Layer: Manages containerized environment state, sandboxing, and isolation
+  - Package Management Layer: Handles real-time package version synchronization and dependency management
 - **Daemon-based State Management**: Background service that maintains environment state and handles updates
 - **Shell Integration**: Seamless shell integration with proper prompt modification and environment activation
 - **Multi-shell Support**: Compatible with bash, zsh, fish, and PowerShell (planned)
@@ -15,7 +18,53 @@ Blast is a modern Python environment manager designed to provide a more robust a
 
 ## Technical Challenges and Solutions
 
-### 1. Shell Integration and Prompt Management
+### 1. Two-Layer Synchronization
+
+One of the most significant challenges was implementing proper synchronization between the environment state and package management layers.
+
+#### The Challenge:
+- Need to maintain two separate but interconnected layers of state
+- Environment layer must handle containerization and isolation
+- Package layer must handle real-time dependency management
+- Both layers must stay in sync without conflicts
+- Changes in one layer must properly propagate to the other
+
+#### The Solution:
+```rust
+// Environment State Layer
+pub struct EnvironmentState {
+    container_id: Uuid,
+    isolation_level: IsolationLevel,
+    resources: ResourceLimits,
+    env_vars: HashMap<String, String>,
+    python_version: PythonVersion,
+    state: HashMap<String, Value>,
+}
+
+// Package Management Layer
+pub struct PackageState {
+    packages: HashMap<String, Version>,
+    dependencies: DependencyGraph,
+    version_constraints: HashMap<String, VersionConstraint>,
+    update_policy: UpdatePolicy,
+}
+
+// Sync Coordinator
+pub struct SyncCoordinator {
+    env_state: Arc<RwLock<EnvironmentState>>,
+    pkg_state: Arc<RwLock<PackageState>>,
+    metrics: Arc<MetricsManager>,
+}
+```
+
+Key improvements:
+- Clear separation of concerns between layers
+- Atomic state updates within each layer
+- Coordinated synchronization between layers
+- Automatic conflict resolution
+- Transaction-based state changes
+
+### 2. Shell Integration and Prompt Management
 
 One of the most significant challenges was implementing proper shell integration, particularly managing the command prompt to accurately reflect the environment state.
 
@@ -42,7 +91,7 @@ Key improvements:
 - Maintains prompt state in environment variables
 - Handles deactivation cleanup properly
 
-### 2. Environment State Synchronization
+### 3. Environment State Synchronization
 
 Another major challenge was maintaining synchronization between the shell environment and the daemon's state.
 
@@ -76,7 +125,7 @@ Another major challenge was maintaining synchronization between the shell enviro
    - Maintains history of state changes
    - Handles version tracking
 
-### 3. ANSI Color Code Handling
+### 4. ANSI Color Code Handling
 
 A particularly tricky challenge was handling ANSI color codes in shell output, which we've now successfully resolved.
 

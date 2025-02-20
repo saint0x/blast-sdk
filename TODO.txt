@@ -3,3 +3,5 @@
 - add support for blastconfig.py where devs can specific if they want a specific veriosn of specific package and we will work aroudn it
 - can also include other custom configs/versions of packages inthis file, which we will use to nuance blast.toml, thus leading to custom cofigs in the image metadata
 - sync logic is robust but we need the 
+
+- rest of cmds beside start/kill need to be implemented
