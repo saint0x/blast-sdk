@@ -1,18 +1,19 @@
+use std::path::PathBuf;
 use std::collections::{HashMap, HashSet};
+use std::time::{SystemTime, Duration};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::info;
-use uuid::Uuid;
-use std::time::Duration;
 
 use crate::{
     error::{BlastError, BlastResult},
     package::Package,
     version::{Version, VersionConstraint},
-    version_history::VersionHistory,
     python::{PythonEnvironment, PythonVersion},
-    sync::IssueSeverity,
     metadata::PackageMetadata,
+    environment::Environment,
+    sync::IssueSeverity,
+    VersionHistory,
 };
 
 /// Environment state at a point in time
@@ -22,9 +23,9 @@ pub struct EnvironmentState {
     pub id: String,
     /// Environment name
     pub name: String,
+    /// Environment path
+    pub path: PathBuf,
     /// Python version
-    /// 
-    /// 
     pub python_version: PythonVersion,
     /// Installed packages with their versions
     pub packages: HashMap<String, Version>,
@@ -33,12 +34,26 @@ pub struct EnvironmentState {
     /// Environment variables
     pub env_vars: HashMap<String, String>,
     /// State creation timestamp
-    pub created_at: DateTime<Utc>,
+    pub created_at: SystemTime,
     /// State metadata
     pub metadata: StateMetadata,
     /// Verification status
     pub verification: Option<StateVerification>,
     active: bool,
+    /// Creation time
+    pub created_at_system: SystemTime,
+    /// Last modified time
+    pub modified_at: SystemTime,
+    /// Package state
+    pub package_state: PackageState,
+    /// Container state
+    pub container_state: ContainerState,
+    /// Resource state
+    pub resource_state: ResourceState,
+    /// Security state
+    pub security_state: SecurityState,
+    /// Sync state
+    pub sync_state: SyncState,
 }
 
 /// Metadata for environment state
@@ -108,6 +123,163 @@ pub struct StateDiff {
     pub python_version_change: Option<(PythonVersion, PythonVersion)>,
 }
 
+/// Package state
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PackageState {
+    /// Installed packages
+    pub installed: HashMap<String, PackageInfo>,
+    /// Package requirements
+    pub requirements: Vec<String>,
+    /// Package constraints
+    pub constraints: Vec<String>,
+    /// Package sources
+    pub sources: Vec<String>,
+}
+
+/// Package information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageInfo {
+    /// Package name
+    pub name: String,
+    /// Package version
+    pub version: String,
+    /// Installation time
+    pub installed_at: SystemTime,
+    /// Dependencies
+    pub dependencies: Vec<String>,
+    /// Whether it's a direct dependency
+    pub is_direct: bool,
+}
+
+/// Container state
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContainerState {
+    /// Container ID
+    pub id: Option<String>,
+    /// Container status
+    pub status: ContainerStatus,
+    /// Container PID
+    pub pid: Option<u32>,
+    /// Container network
+    pub network: Option<NetworkState>,
+    /// Container mounts
+    pub mounts: Vec<MountState>,
+}
+
+/// Container status
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContainerStatus {
+    /// Container is created
+    Created,
+    /// Container is running
+    Running,
+    /// Container is paused
+    Paused,
+    /// Container is stopped
+    Stopped,
+    /// Container is deleted
+    Deleted,
+}
+
+impl Default for ContainerStatus {
+    fn default() -> Self {
+        Self::Created
+    }
+}
+
+/// Network state
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkState {
+    /// Network ID
+    pub id: String,
+    /// Network name
+    pub name: String,
+    /// Network type
+    pub network_type: String,
+    /// IP address
+    pub ip_address: Option<String>,
+    /// Gateway
+    pub gateway: Option<String>,
+    /// DNS servers
+    pub dns: Vec<String>,
+}
+
+/// Mount state
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountState {
+    /// Mount source
+    pub source: PathBuf,
+    /// Mount target
+    pub target: PathBuf,
+    /// Mount type
+    pub mount_type: String,
+    /// Mount options
+    pub options: Vec<String>,
+}
+
+/// Resource state
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResourceState {
+    /// CPU usage
+    pub cpu_usage: f64,
+    /// Memory usage
+    pub memory_usage: u64,
+    /// Disk usage
+    pub disk_usage: u64,
+    /// Network usage
+    pub network_usage: NetworkUsage,
+}
+
+/// Network usage
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NetworkUsage {
+    /// Bytes received
+    pub rx_bytes: u64,
+    /// Bytes transmitted
+    pub tx_bytes: u64,
+    /// Packets received
+    pub rx_packets: u64,
+    /// Packets transmitted
+    pub tx_packets: u64,
+}
+
+/// Security state
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecurityState {
+    /// Current capabilities
+    pub capabilities: Vec<String>,
+    /// Seccomp status
+    pub seccomp_enabled: bool,
+    /// AppArmor profile
+    pub apparmor_profile: Option<String>,
+    /// SELinux context
+    pub selinux_context: Option<String>,
+}
+
+/// Sync state
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncState {
+    /// Sync enabled
+    pub enabled: bool,
+    /// Last sync time
+    pub last_sync: Option<SystemTime>,
+    /// Pending changes
+    pub pending_changes: usize,
+    /// Stability score
+    pub stability_score: u8,
+}
+
+impl Default for SyncState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            last_sync: None,
+            pending_changes: 0,
+            stability_score: 100,
+        }
+    }
+}
+
 // Helper function to create package metadata from dependencies
 fn create_package_metadata(
     name: String,
@@ -126,19 +298,21 @@ fn create_package_metadata(
 impl EnvironmentState {
     /// Create a new environment state
     pub fn new(
+        id: String,
         name: String,
+        path: PathBuf,
         python_version: PythonVersion,
-        packages: HashMap<String, Version>,
-        env_vars: HashMap<String, String>,
     ) -> Self {
+        let now = SystemTime::now();
         Self {
-            id: Uuid::new_v4().to_string(),
+            id,
             name,
+            path,
             python_version,
-            packages,
+            packages: HashMap::new(),
             version_histories: HashMap::new(),
-            env_vars,
-            created_at: Utc::now(),
+            env_vars: HashMap::new(),
+            created_at: now,
             metadata: StateMetadata {
                 description: None,
                 tags: HashSet::new(),
@@ -146,21 +320,33 @@ impl EnvironmentState {
             },
             verification: None,
             active: false,
+            created_at_system: now,
+            modified_at: now,
+            package_state: PackageState::default(),
+            container_state: ContainerState::default(),
+            resource_state: ResourceState::default(),
+            security_state: SecurityState::default(),
+            sync_state: SyncState::default(),
         }
     }
 
     /// Create a new environment state from a Python environment
-    pub fn from_environment(env: &PythonEnvironment) -> BlastResult<Self> {
-        let packages = env.get_packages()?
+    pub async fn from_environment(env: &PythonEnvironment) -> BlastResult<Self> {
+        let _packages = env.get_packages().await?
             .into_iter()
             .map(|p| (p.name().to_string(), p.version().clone()))
-            .collect();
+            .collect::<HashMap<String, Version>>();
+
+        let name = match env.name() {
+            "" => "unnamed".to_string(),
+            name => name.to_string(),
+        };
 
         Ok(Self::new(
-            env.name().unwrap_or("unnamed").to_string(),
-            env.python_version().clone(),
-            packages,
-            HashMap::new(), // Environment variables will be added when supported
+            name.clone(),
+            name,
+            env.path().to_path_buf(),
+            PythonVersion::parse(env.python_version())?,
         ))
     }
 
@@ -442,6 +628,31 @@ impl EnvironmentState {
     pub fn set_active(&mut self, active: bool) {
         self.active = active;
     }
+
+    /// Update modified time
+    pub fn touch(&mut self) {
+        self.modified_at = SystemTime::now();
+    }
+
+    /// Add environment variable
+    pub fn add_env_var(&mut self, key: String, value: String) {
+        self.env_vars.insert(key, value);
+        self.touch();
+    }
+
+    /// Remove environment variable
+    pub fn remove_env_var(&mut self, key: &str) -> Option<String> {
+        let value = self.env_vars.remove(key);
+        if value.is_some() {
+            self.touch();
+        }
+        value
+    }
+
+    /// Get environment variable
+    pub fn get_env_var(&self, key: &str) -> Option<&String> {
+        self.env_vars.get(key)
+    }
 }
 
 /// Checkpoint for environment state
@@ -513,5 +724,24 @@ impl StateIssue {
 impl EnvironmentState {
     pub fn name(&self) -> &str {
         &self.name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_environment_state() {
+        let state = EnvironmentState::new(
+            "test-id".to_string(),
+            "test-env".to_string(),
+            PathBuf::from("/tmp/test-env"),
+            PythonVersion::new(3, 9, Some(0)),
+        );
+
+        assert_eq!(state.id, "test-id");
+        assert_eq!(state.name, "test-env");
+        assert_eq!(state.python_version, PythonVersion::new(3, 9, Some(0)));
     }
 } 

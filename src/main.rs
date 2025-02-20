@@ -7,6 +7,7 @@ use tokio::sync::watch;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::Once;
+use blast_daemon::{Daemon, DaemonConfig, state::StateManagement, StateManager};
 
 static LOGGING_INIT: Once = Once::new();
 
@@ -59,7 +60,7 @@ async fn main() -> Result<()> {
             debug!("Initializing daemon");
 
             // Initialize daemon
-            let daemon = blast_daemon::Daemon::new(blast_daemon::DaemonConfig {
+            let daemon = Daemon::new(DaemonConfig {
                 max_pending_updates: 100,
                 max_snapshot_age_days: 7,
                 env_path: project_root.join("environments/default"),
@@ -70,16 +71,17 @@ async fn main() -> Result<()> {
             debug!("Setting up state management");
 
             // Initialize state manager
-            let state_manager = Arc::new(RwLock::new(blast_daemon::StateManager::new(
+            let state_manager = Arc::new(RwLock::new(StateManager::new(
                 project_root.clone(),
             )));
 
             {
                 let state = state_manager.write().map_err(|e| anyhow::anyhow!("Failed to acquire state lock: {}", e))?;
+                let state_manager: &dyn StateManagement = &*state;
                 debug!("Saving initial state");
-                state.save().await?;
+                StateManagement::save(state_manager).await?;
                 debug!("Loading state");
-                state.load().await?;
+                StateManagement::load(state_manager).await?;
             }
 
             info!("State management ready");

@@ -2,7 +2,7 @@ use blast_core::{
     config::BlastConfig,
     error::BlastResult,
 };
-use blast_daemon::{Daemon, DaemonConfig};
+use blast_daemon::{Daemon, DaemonConfig, state::StateManagement};
 use tracing::{debug, info};
 
 /// Execute the check command
@@ -23,46 +23,29 @@ pub async fn execute(config: &BlastConfig) -> BlastResult<()> {
     // Get current environment state
     let state_manager = daemon.state_manager();
     let state_guard = state_manager.read().await;
-    let current_state = state_guard.get_current_state().await?;
-
-    // Get activation state
-    let _activation_state = daemon.get_activation_state().await?;
+    let state_manager: &dyn StateManagement = &*state_guard;
+    let current_state = state_manager.get_current_state().await?;
 
     info!("Environment Status:");
-    if !current_state.is_active() {
+    if current_state.active_env_name.is_none() {
         info!("  No active environment");
         return Ok(());
     }
 
     // Show environment details
-    info!("  Name: {}", current_state.name());
-    info!("  Python: {}", current_state.python_version);
+    let env_name = current_state.active_env_name.clone().unwrap();
+    let python_version = current_state.active_python_version
+        .as_ref()
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    info!("  Name: {}", env_name);
+    info!("  Python: {}", python_version);
     info!("  Status: Active");
-    info!("  Packages: {}", current_state.packages.len());
-
-    // List environments to get package count
-    let environments = daemon.list_environments().await?;
-    if let Some(env) = environments.iter().find(|e| e.name == current_state.name()) {
-        info!("  Path: {}", env.path.display());
-    }
-
-    // Show verification status
-    if let Some(verification) = current_state.verification.as_ref() {
-        info!("\nVerification Status:");
-        info!("  Verified: {}", verification.is_verified);
-        if !verification.issues.is_empty() {
-            info!("  Issues:");
-            for issue in &verification.issues {
-                info!("    - {} ({:?})", issue.description, issue.severity);
-                if let Some(context) = &issue.context {
-                    info!("      Context: {}", context);
-                }
-                if let Some(recommendation) = &issue.recommendation {
-                    info!("      Recommendation: {}", recommendation);
-                }
-            }
-        }
-    }
+    
+    // TODO: Implement package listing
+    info!("  Packages: Not implemented yet");
+    info!("  Path: {}", config.project_root.join("environments").join(&env_name).display());
 
     Ok(())
 } 

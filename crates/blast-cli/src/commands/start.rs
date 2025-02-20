@@ -3,14 +3,19 @@ use std::io::Write;
 use blast_core::{
     config::BlastConfig,
     error::BlastResult,
-    python::PythonVersion,
+    python::{PythonVersion, PythonEnvironment},
     security::{SecurityPolicy, IsolationLevel, ResourceLimits},
+    environment::Environment,
 };
-use blast_daemon::{Daemon, DaemonConfig};
+use blast_daemon::{
+    Daemon, 
+    DaemonConfig,
+    state::StateManagement,
+};
 use uuid::Uuid;
 use crate::shell::EnvironmentActivator;
-use crate::environment::Environment;
 use tokio::process::Command;
+use serde_json;
 
 /// Execute the start command
 pub async fn execute(
@@ -54,7 +59,7 @@ async fn handle_setup_phase(
     python: Option<String>,
     name: Option<String>,
     path: Option<PathBuf>,
-    env_vars: Vec<String>,
+    _env_vars: Vec<String>,
     config: &BlastConfig,
 ) -> BlastResult<()> {
     eprintln!("Creating new Blast environment");
@@ -96,12 +101,12 @@ async fn handle_setup_phase(
     // Create the environment structure
     eprintln!("Creating Environment");
     eprintln!("Setting up directory structure");
-    let environment = Environment::new(
-        env_path.clone(),
+    let environment = PythonEnvironment::new(
         env_name.clone(),
+        env_path.clone(),
         python_version.clone(),
-    );
-    environment.create()?;
+    ).await?;
+    Environment::init(&environment).await?;
     eprintln!("Done");
 
     // Create daemon configuration
@@ -131,37 +136,19 @@ async fn handle_setup_phase(
     eprintln!("Setting Up State");
     eprintln!("Initializing state manager");
     let state_manager = daemon.state_manager();
-    state_manager.write().await.load().await?;
-    eprintln!("Done");
-
-    // Create environment state
-    let env_state = blast_core::state::EnvironmentState::new(
-        env_name.clone(),
-        python_version.clone(),
-        env_vars.into_iter()
-            .filter_map(|var| {
-                let parts: Vec<&str> = var.split('=').collect();
-                if parts.len() == 2 {
-                    blast_core::Version::parse("0.1.0")
-                        .ok()
-                        .map(|version| (parts[0].to_string(), version))
-                } else {
-                    None
-                }
-            })
-            .collect(),
-        Default::default(),
-    );
-
-    eprintln!("Saving environment state");
-    state_manager.write().await.add_environment(env_name.clone(), env_state.clone()).await?;
+    let state_manager = state_manager.write().await;
+    let state_manager: &dyn StateManagement = &*state_manager;
+    state_manager.set_active_environment(env_name.clone(), env_path.clone(), python_version.clone()).await?;
     eprintln!("Done");
 
     eprintln!("Creating initial checkpoint");
-    state_manager.write().await.create_checkpoint(
+    state_manager.create_checkpoint(
         Uuid::new_v4(),
         "Initial environment creation".to_string(),
-        None,
+        Some(serde_json::json!({
+            "env_name": env_name,
+            "python_version": python_version.to_string()
+        })),
     ).await?;
     eprintln!("Done");
 

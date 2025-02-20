@@ -212,6 +212,154 @@ The implementation is now robust enough to handle:
 - Piped commands
 - Script evaluation contexts
 
+## Sandboxing Implementation Details
+
+### 1. Network Isolation Layer
+
+The network isolation layer provides comprehensive control over network access and monitoring:
+
+```rust
+pub struct NetworkState {
+    connections: Arc<RwLock<HashMap<String, ConnectionInfo>>>,
+    bandwidth_usage: Arc<RwLock<BandwidthUsage>>,
+    policy: NetworkPolicy,
+}
+
+pub struct NetworkPolicy {
+    allow_outbound: bool,
+    allow_inbound: bool,
+    allowed_outbound_ports: Vec<u16>,
+    allowed_inbound_ports: Vec<u16>,
+    allowed_domains: Vec<String>,
+    allowed_ips: Vec<String>,
+    dns_servers: Vec<String>,
+    bandwidth_limit: Option<u64>,
+    interface_config: NetworkInterfaceConfig,
+}
+```
+
+Key Features:
+- Real-time connection tracking and monitoring
+- Bandwidth usage tracking and throttling
+- Domain and IP allowlisting
+- Port-level access control
+- Network namespace isolation
+
+### 2. Resource Control Layer
+
+The resource control layer manages system resource allocation and limits:
+
+```rust
+pub struct ResourceManager {
+    limits: ResourceLimits,
+    usage: Arc<RwLock<ResourceUsage>>,
+    update_interval: Duration,
+}
+
+pub struct ResourceLimits {
+    cpu: CpuLimits,
+    memory: MemoryLimits,
+    io: IoLimits,
+    process: ProcessLimits,
+    network: NetworkLimits,
+}
+```
+
+Implementation Details:
+- CPU scheduling and usage limits
+- Memory allocation and swap controls
+- I/O bandwidth and operations throttling
+- Process and thread count restrictions
+- Real-time resource usage monitoring
+
+### 3. Filesystem Security Layer
+
+The filesystem security layer provides comprehensive filesystem access control:
+
+```rust
+pub struct FilesystemState {
+    mounts: Arc<RwLock<HashMap<PathBuf, MountInfo>>>,
+    access_tracking: Arc<RwLock<HashMap<PathBuf, FileAccessInfo>>>,
+    policy: FilesystemPolicy,
+}
+
+pub struct FilesystemPolicy {
+    root_dir: PathBuf,
+    readonly_paths: Vec<PathBuf>,
+    hidden_paths: Vec<PathBuf>,
+    allowed_paths: Vec<PathBuf>,
+    denied_paths: Vec<PathBuf>,
+    mount_points: HashMap<PathBuf, MountConfig>,
+    tmp_dir: PathBuf,
+    max_file_size: u64,
+    max_total_size: u64,
+}
+```
+
+Security Features:
+- Path-based access control
+- Read-only path enforcement
+- Hidden path masking
+- Mount point isolation
+- File size restrictions
+- Access tracking and auditing
+
+### 4. Container Runtime Integration
+
+The container runtime provides the foundation for isolation:
+
+```rust
+pub trait ContainerRuntime: Send + Sync {
+    async fn create_namespaces(&self, config: &NamespaceConfig) -> BlastResult<()>;
+    async fn setup_cgroups(&self, config: &CGroupConfig) -> BlastResult<()>;
+    async fn configure_network(&self, policy: &NetworkPolicy) -> BlastResult<()>;
+    async fn setup_filesystem(&self, policy: &FilesystemPolicy) -> BlastResult<()>;
+    async fn initialize(&self) -> BlastResult<()>;
+    async fn get_state(&self) -> BlastResult<ContainerState>;
+    async fn cleanup(&self) -> BlastResult<()>;
+}
+```
+
+Implementation Features:
+- Namespace isolation (PID, Network, Mount, IPC)
+- CGroup resource controls
+- Network configuration
+- Filesystem setup and isolation
+- State management and cleanup
+
+### 5. Security Policy Enforcement
+
+The security policy enforcement system ensures:
+
+1. **Default Deny Policies**:
+   - All access is denied by default
+   - Explicit allowlisting required
+   - Granular permission control
+
+2. **Resource Quotas**:
+   - CPU usage limits
+   - Memory allocation caps
+   - I/O bandwidth restrictions
+   - Process count controls
+
+3. **Access Control**:
+   - Network access restrictions
+   - Filesystem permissions
+   - Process isolation
+   - Resource limits
+
+4. **Monitoring and Auditing**:
+   - Real-time state tracking
+   - Resource usage monitoring
+   - Security boundary verification
+   - Access logging
+
+5. **Recovery Procedures**:
+   - Proper cleanup on failure
+   - State recovery mechanisms
+   - Resource deallocation
+   - Network cleanup
+
 ## Architecture
 
 Blast follows a client-daemon architecture with a focus on robust environment management:

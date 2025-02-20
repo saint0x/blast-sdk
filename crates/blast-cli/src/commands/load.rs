@@ -3,8 +3,13 @@ use blast_core::{
     config::BlastConfig,
     error::{BlastError, BlastResult},
     security::SecurityPolicy,
+    environment::Environment,
+    python::PythonVersion,
 };
-use blast_daemon::{Daemon, DaemonConfig};
+use blast_daemon::{
+    Daemon, 
+    DaemonConfig,
+};
 use blast_image::{
     layer::Layer as Image,
     error::Error as ImageError,
@@ -89,7 +94,7 @@ pub async fn execute(name: Option<String>, config: &BlastConfig) -> BlastResult<
                         i + 1,
                         img.name,
                         img.metadata.created_at.format("%Y-%m-%d %H:%M:%S"),
-                        manifest.metadata.python_version
+                        manifest.python_version
                     );
                 }
 
@@ -118,7 +123,7 @@ pub async fn execute(name: Option<String>, config: &BlastConfig) -> BlastResult<
 
     // Create environment with image's Python version
     let policy = SecurityPolicy {
-        python_version: manifest.metadata.python_version.clone(),
+        python_version: PythonVersion::parse(&manifest.python_version)?,
         ..SecurityPolicy::default()
     };
     
@@ -127,8 +132,16 @@ pub async fn execute(name: Option<String>, config: &BlastConfig) -> BlastResult<
     // Apply image contents to environment
     image.save(&env.path()).map_err(convert_image_error)?;
 
-    // Activate the environment
-    daemon.activate_environment(&image_name, manifest.metadata.python_version.clone()).await?;
+    // TODO: Implement environment activation
+    // For now, just set up the environment variables and state
+    let state_manager = daemon.state_manager();
+    let state_manager = state_manager.write().await;
+    let state_manager: &dyn blast_daemon::state::StateManagement = &*state_manager;
+    state_manager.set_active_environment(
+        image_name.clone(),
+        env.path().to_path_buf(),
+        policy.python_version.clone()
+    ).await?;
 
     // Set up environment variables
     std::env::set_var("BLAST_ENV_NAME", &image_name);

@@ -387,6 +387,7 @@ dependencies = [
  "glob",
  "indicatif",
  "mockall",
+ "nix",
  "notify",
  "petgraph",
  "predicates 3.1.3",

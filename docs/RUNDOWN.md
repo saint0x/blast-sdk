@@ -21,6 +21,17 @@ isolation_level = "process"  # Process, namespace, or container
 resource_limits = true       # Enable resource limits
 network_policy = "isolated"  # Network isolation policy
 
+# Sandboxing Configuration (Required)
+[sandbox]
+network_isolation = true    # Enable network isolation
+resource_control = true     # Enable resource control
+filesystem_isolation = true # Enable filesystem isolation
+
+# Security Configuration (Required)
+[security]
+default_policy = "strict"   # Security policy level
+audit_logging = true        # Enable security audit logging
+
 # Sync Configuration (Required)
 [sync]
 env_layer = "strict"      # Environment layer sync policy
@@ -64,6 +75,30 @@ update_dependencies = true # Update dependencies with packages
 [monitor]
 enabled = true            # Enable file monitoring
 watch_paths = ["src"]     # Paths to monitor for changes
+
+# Network Isolation Configuration
+[sandbox.network]
+allow_outbound = false
+allow_inbound = false
+allowed_outbound_ports = [443, 80]
+allowed_domains = ["pypi.org", "files.pythonhosted.org"]
+bandwidth_limit = 10485760  # 10MB/s
+
+# Resource Control Configuration
+[sandbox.resources]
+cpu_limit = 100.0          # CPU usage percentage
+memory_limit = 2147483648  # 2GB memory limit
+disk_limit = 10737418240   # 10GB disk limit
+iops_limit = 1000          # IO operations per second
+process_limit = 50         # Maximum processes
+
+# Filesystem Security Configuration
+[sandbox.filesystem]
+readonly_paths = ["/usr", "/lib", "/bin"]
+hidden_paths = ["/proc", "/sys", "/dev"]
+allowed_paths = ["/tmp", "/var/tmp"]
+denied_paths = ["/etc/shadow", "/etc/passwd", "/root"]
+max_file_size = 104857600  # 100MB max file size
 ```
 
 ## Implemented Features
@@ -81,17 +116,40 @@ watch_paths = ["src"]     # Paths to monitor for changes
 - Basic file system monitoring
 - Update service for package management
 
-### 3. Background Services
+### 3. Sandboxing and Security
+- Network Isolation
+  - Connection tracking and monitoring
+  - Domain and IP allowlisting
+  - Port access control
+  - Bandwidth throttling
+  - Network namespace isolation
+
+- Resource Control
+  - CPU usage limits and scheduling
+  - Memory allocation controls
+  - I/O bandwidth throttling
+  - Process/thread limits
+  - CGroup-based resource management
+
+- Filesystem Security
+  - Path-based access control
+  - Read-only enforcement
+  - Mount point isolation
+  - Size restrictions
+  - Access tracking
+
+- Security Policy Enforcement
+  - Default deny policies
+  - Least privilege access
+  - Resource quotas
+  - Audit logging
+  - Secure recovery procedures
+
+### 4. Background Services
 - Daemon service for environment management
 - IPC server for command handling
 - Update queue for package operations
 - Asynchronous operation handling
-
-### 4. Caching System
-- Package metadata caching
-- Resolution result caching
-- Filesystem-based cache storage
-- Cache invalidation and cleanup
 
 ## Command Set (Implemented)
 

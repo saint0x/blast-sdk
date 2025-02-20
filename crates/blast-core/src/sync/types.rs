@@ -48,4 +48,39 @@ pub struct CacheSizeLimits {
     pub max_size: u64,
     /// Maximum age of cached items in seconds
     pub max_age: u64,
+}
+
+/// Sync operation type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SyncOperation {
+    /// Add package
+    AddPackage(Package),
+    /// Remove package
+    RemovePackage(Package),
+    /// Update package
+    UpdatePackage {
+        name: String,
+        from_version: String,
+        to_version: String,
+    },
+    /// Update environment variable
+    UpdateEnvVar {
+        key: String,
+        value: String,
+    },
+    /// Update Python version
+    UpdatePythonVersion(String),
+}
+
+/// Operation status
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OperationStatus {
+    /// Operation is pending
+    Pending,
+    /// Operation is in progress
+    InProgress,
+    /// Operation completed successfully
+    Completed,
+    /// Operation failed
+    Failed(String),
 } 

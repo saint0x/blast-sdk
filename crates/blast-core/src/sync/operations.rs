@@ -7,6 +7,29 @@ use crate::python::PythonVersion;
 use super::types::SyncChange;
 use super::conflicts::SyncConflict;
 use super::validation::SyncValidation;
+use crate::package::Package;
+
+/// Type of sync operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SyncOperationType {
+    /// Add package
+    AddPackage(Package),
+    /// Remove package
+    RemovePackage(Package),
+    /// Update package
+    UpdatePackage {
+        name: String,
+        from_version: String,
+        to_version: String,
+    },
+    /// Update environment variable
+    UpdateEnvVar {
+        key: String,
+        value: String,
+    },
+    /// Update Python version
+    UpdatePythonVersion(String),
+}
 
 /// Sync operation between environments
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +46,8 @@ pub struct SyncOperation {
     pub completed_at: Option<DateTime<Utc>>,
     /// Operation status
     pub status: SyncStatus,
+    /// Operation type
+    pub operation_type: SyncOperationType,
     /// Package changes
     pub changes: Vec<SyncChange>,
     /// Conflicts that need resolution
@@ -65,8 +90,8 @@ pub struct UpgradeOperation {
     pub completed_at: Option<u64>,
 }
 
-/// Status of an operation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Operation status
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationStatus {
     /// Operation is pending
     Pending,
@@ -79,6 +104,7 @@ pub enum OperationStatus {
 }
 
 impl UpgradeOperation {
+    #[allow(dead_code)]
     pub fn new(package: String, from_version: PythonVersion, to_version: PythonVersion) -> Self {
         Self {
             package,
@@ -94,6 +120,7 @@ impl UpgradeOperation {
         }
     }
 
+    #[allow(dead_code)]
     pub fn complete(&mut self, status: OperationStatus) {
         self.status = status;
         self.completed_at = Some(

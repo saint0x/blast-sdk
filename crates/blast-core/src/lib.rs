@@ -43,7 +43,7 @@ pub use crate::types::{CacheSettings, UpdateStrategy};
 pub use crate::version_control::{VersionManager, VersionPolicy, UpgradeStrategy};
 pub use crate::version_history::{VersionHistory, VersionEvent, VersionImpact};
 pub use crate::state::{EnvironmentState, StateCheckpoint, StateDiff, StateVerification};
-pub use crate::sync::{SyncManager, SyncOperation, SyncStatus, SyncChange, SyncConflict, ConflictResolution};
+pub use crate::sync::{SyncManager, SyncOperation, SyncChange, SyncConflict, ConflictResolution, SyncStatus};
 pub use crate::manifest::{
     Manifest, BlastMetadata, SystemDependency, ResourceRequirements,
     VenvConfig, LayerInfo, LayerType, CompressionType,

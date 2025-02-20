@@ -1,8 +1,10 @@
 use blast_core::{
     config::BlastConfig,
     error::BlastResult,
+    python::{PythonEnvironment, PythonVersion},
+    environment::Environment,
 };
-use blast_daemon::{Daemon, DaemonConfig};
+use blast_daemon::{Daemon, DaemonConfig, state::StateManagement};
 use tracing::{debug, info};
 
 /// Execute the clean command
@@ -32,23 +34,22 @@ pub async fn execute(config: &BlastConfig) -> BlastResult<()> {
     // Get current environment state
     let state_manager = daemon.state_manager();
     let state_guard = state_manager.read().await;
-    let current_state = state_guard.get_current_state().await?;
+    let state_manager: &dyn StateManagement = &*state_guard;
+    let current_state = state_manager.get_current_state().await?;
 
-    if current_state.is_active() {
+    if current_state.active_env_name.is_some() {
         info!("Cleaning environment: {}", env_name);
         
         // Create a Python environment instance
-        let env = blast_core::python::PythonEnvironment::new(
+        let environment = PythonEnvironment::new(
+            env_name.clone(),
             config.project_root.join("environments").join(&env_name),
-            current_state.python_version.clone(),
-        );
-        
-        // Clean the environment
-        daemon.clean_environment(&env).await?;
-        
-        // Reinitialize environment
-        daemon.reinitialize_environment(&env).await?;
+            current_state.active_python_version.unwrap_or_else(|| PythonVersion::parse("3.8.0").unwrap()),
+        ).await?;
 
+        // Initialize the environment
+        Environment::init(&environment).await?;
+        
         info!("Environment cleaned and reinitialized");
     } else {
         info!("No active environment found");

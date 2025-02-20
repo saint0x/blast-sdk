@@ -13,7 +13,6 @@ pub mod output;
 mod progress;
 pub mod shell;
 pub mod setup;
-mod environment;
 
 pub use commands::*;
 pub use output::*;

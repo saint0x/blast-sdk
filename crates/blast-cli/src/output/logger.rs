@@ -1,8 +1,8 @@
-use console::{style, Term, Style};
+use console::{style, Style};
 use std::fmt::Display;
+use std::io::Write;
 
 pub struct Logger {
-    term: Term,
     no_color: bool,
 }
 
@@ -46,18 +46,9 @@ impl Display for HealthStatus {
 impl Logger {
     pub fn new() -> Self {
         Self {
-            term: Term::stdout(),
             no_color: std::env::var("NO_COLOR").is_ok() 
                 || std::env::var("CLICOLOR").map(|v| v == "0").unwrap_or(false)
                 || std::env::var("CLICOLOR_FORCE").map(|v| v == "0").unwrap_or(false),
-        }
-    }
-
-    fn style(&self, text: impl Display) -> String {
-        if self.no_color {
-            text.to_string()
-        } else {
-            style(text.to_string()).to_string()
         }
     }
 
@@ -70,9 +61,7 @@ impl Logger {
     }
 
     pub fn header(&self, text: &str) {
-        let width = self.term.size().1 as usize;
-        let padding = "=".repeat((width - text.len() - 2) / 2);
-        println!("\n{} {} {}\n", padding, self.style_bold(text), padding);
+        println!("\n{}\n", self.style_bold(text));
     }
 
     pub fn section(&self, text: &str) {
@@ -80,14 +69,12 @@ impl Logger {
     }
 
     pub fn status(&self, label: &str, status: HealthStatus) {
-        println!("{}: {}", 
-            self.style_bold(label),
-            if self.no_color {
-                status.to_string()
-            } else {
-                status.color().apply_to(status.to_string()).to_string()
-            }
-        );
+        let status_str = if self.no_color {
+            status.to_string()
+        } else {
+            status.color().apply_to(status.to_string()).to_string()
+        };
+        println!("{}: {}", self.style_bold(label), status_str);
     }
 
     pub fn info(&self, label: &str, value: impl Display) {
@@ -95,27 +82,23 @@ impl Logger {
     }
 
     pub fn resource(&self, label: &str, used: u64, total: u64) {
-        let percentage = (used as f32 / total as f32) * 100.0;
-        let status = if percentage > 90.0 {
-            HealthStatus::Bad
-        } else if percentage > 70.0 {
-            HealthStatus::Okay
+        let percent = (used as f64 / total as f64) * 100.0;
+        let status = HealthStatus::from_resource_usage(
+            percent as f32,
+            percent as f32,
+            percent as f32,
+        );
+        let status_str = if self.no_color {
+            format!("{:.1}%", percent)
         } else {
-            HealthStatus::Good
+            status.color().apply_to(format!("{:.1}%", percent)).to_string()
         };
-
-        let dot = if self.no_color {
-            "●".to_string()
-        } else {
-            status.color().apply_to("●").to_string()
-        };
-
-        println!("{}: {} / {} ({:.1}%) {}",
+        println!(
+            "{}: {} ({} / {})",
             self.style_bold(label),
+            status_str,
             self.format_bytes(used),
             self.format_bytes(total),
-            percentage,
-            dot
         );
     }
 
@@ -131,35 +114,41 @@ impl Logger {
         if self.no_color {
             println!("WARNING: {}", text);
         } else {
-            println!("{} {}", 
-                style("WARNING:").yellow().bold(),
-                text
-            );
+            println!("{} {}", style("WARNING:").yellow().bold(), text);
         }
     }
 
     pub fn error(&self, text: impl Display) {
         if self.no_color {
-            println!("ERROR: {}", text);
+            eprintln!("ERROR: {}", text);
         } else {
-            println!("{} {}", 
-                style("ERROR:").red().bold(),
-                text
-            );
+            eprintln!("{} {}", style("ERROR:").red().bold(), text);
         }
     }
 
     pub fn progress(&self, text: impl Display) {
-        print!("{} {} ... ", style("→").cyan().bold(), text);
-        self.term.flush().unwrap();
+        if self.no_color {
+            print!("→ {} ... ", text);
+        } else {
+            print!("{} {} ... ", style("→").cyan().bold(), text);
+        }
+        std::io::stdout().flush().unwrap();
     }
 
     pub fn done(&self) {
-        println!("{}", style("done").green().bold());
+        if self.no_color {
+            println!("done");
+        } else {
+            println!("{}", style("done").green().bold());
+        }
     }
 
     pub fn failed(&self) {
-        println!("{}", style("failed").red().bold());
+        if self.no_color {
+            println!("failed");
+        } else {
+            println!("{}", style("failed").red().bold());
+        }
     }
 
     fn format_bytes(&self, bytes: u64) -> String {

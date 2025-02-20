@@ -2,17 +2,15 @@
 
 use blast_core::{
     package::Package,
-    state::EnvironmentState,
     python::PythonVersion,
 };
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, debug, error};
 use std::path::PathBuf;
-use std::collections::HashMap;
 use std::sync::Arc;
-use crate::{DaemonError, DaemonResult};
+use crate::service::{DaemonResult, DaemonError};
 use crate::monitor::{MonitorEvent, PythonResourceMonitor, PythonResourceLimits};
-use crate::state::StateManager;
+use crate::state::{StateManager, StateManagement, State};
 
 /// Update manager for Python environments
 pub struct UpdateManager {
@@ -126,18 +124,17 @@ impl UpdateManager {
 
     /// Sync environment state with daemon
     async fn sync_environment_state(&self) -> DaemonResult<()> {
-        // Create new environment state
-        let env_state = EnvironmentState::new(
-            "default".to_string(),
-            PythonVersion::parse("3.8.0").unwrap(),
-            HashMap::new(),
-            HashMap::new(),
-        );
+        // Create new state
+        let state = State {
+            active_env_name: Some("default".to_string()),
+            active_python_version: Some(PythonVersion::parse("3.8.0").unwrap()),
+            ..State::default()
+        };
 
         // Update state manager
         let state_manager = self.state_manager.clone();
-        let state = state_manager.write().await;
-        state.update_current_state(env_state).await?;
+        let state_guard = state_manager.write().await;
+        state_guard.update_current_state(state).await?;
 
         Ok(())
     }

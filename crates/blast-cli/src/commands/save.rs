@@ -2,9 +2,10 @@ use std::io::{self, Write};
 use blast_core::{
     config::BlastConfig,
     error::{BlastError, BlastResult},
-    python::PythonEnvironment,
+    python::{PythonEnvironment, PythonVersion},
+    environment::Environment,
 };
-use blast_daemon::{Daemon, DaemonConfig};
+use blast_daemon::{Daemon, DaemonConfig, state::StateManagement};
 use blast_image::{
     layer::{Layer as Image, LayerType},
     compression::{CompressionType, CompressionLevel},
@@ -87,14 +88,24 @@ pub async fn execute(name: Option<String>, config: &BlastConfig) -> BlastResult<
     // Get current environment state
     let state_manager = daemon.state_manager();
     let state_guard = state_manager.read().await;
-    let current_state = state_guard.get_current_state().await?;
+    let state_manager: &dyn StateManagement = &*state_guard;
+    let current_state = state_manager.get_current_state().await?;
 
-    if current_state.is_active() {
+    if let Some(active_env_name) = &current_state.active_env_name {
         // Create Python environment instance
+        let python_version = current_state.active_python_version
+            .clone()
+            .unwrap_or_else(|| PythonVersion::parse("3.8.0").unwrap());
+            
+        let env_path = config.project_root.join("environments").join(active_env_name);
         let env = PythonEnvironment::new(
-            config.project_root.join("environments").join(&env_name),
-            current_state.python_version.clone(),
-        );
+            active_env_name.clone(),
+            env_path.clone(),
+            python_version.clone(),
+        ).await?;
+
+        // Initialize environment if needed
+        Environment::init(&env).await?;
 
         // Create image from environment with options
         let mut image = Image::from_environment_with_options(
@@ -110,8 +121,8 @@ pub async fn execute(name: Option<String>, config: &BlastConfig) -> BlastResult<
 
         info!("Successfully saved environment image:");
         info!("  Name: {}", image_name);
-        info!("  Environment: {}", env_name);
-        info!("  Python: {}", env.python_version());
+        info!("  Environment: {}", active_env_name);
+        info!("  Python: {}", python_version);
         info!("  Compression ratio: {:.2}x", image.compression_ratio());
         info!("  Total size: {} bytes", image.size());
         info!("  Path: {}", image_path.display());

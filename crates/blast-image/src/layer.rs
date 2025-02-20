@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use blake3::Hasher;
 
 use blast_core::python::PythonEnvironment;
+use blast_core::environment::Environment;
 
 use crate::compression::{CompressionLevel, CompressionType, CompressionStrategy, create_strategy};
 use crate::error::{Error, Result};
@@ -132,10 +133,10 @@ impl Layer {
         compression_level: CompressionLevel,
     ) -> Result<Self> {
         let name = format!("{}_{}", 
-            env.name().unwrap_or("unknown"), 
-            env.python_version().to_string()
+            Environment::name(env), 
+            Environment::python_version(env)
         );
-        let path = env.path().to_path_buf();
+        let path = Environment::path(env).to_path_buf();
         Ok(Self::new(name, path, layer_type, compression_type, compression_level))
     }
 

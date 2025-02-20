@@ -139,6 +139,123 @@ impl SyncCoordinator {
 ### 9. Configuration Parser
 - Uses a TOML parser (e.g. toml-rs) to read a unified configuration file (an extended version of pyproject.toml) where dependencies, update policies, and environment settings are declared
 
+## Sandboxing and Security Architecture
+
+### Multi-Layer Security Model
+
+Blast implements a comprehensive multi-layer security model for Python environment isolation:
+
+#### 1. Network Isolation Layer
+```rust
+pub struct NetworkPolicy {
+    pub allow_outbound: bool,
+    pub allow_inbound: bool,
+    pub allowed_outbound_ports: Vec<u16>,
+    pub allowed_inbound_ports: Vec<u16>,
+    pub allowed_domains: Vec<String>,
+    pub allowed_ips: Vec<String>,
+    pub dns_servers: Vec<String>,
+    pub bandwidth_limit: Option<u64>,
+    pub interface_config: NetworkInterfaceConfig,
+}
+```
+
+- Real-time connection tracking and bandwidth monitoring
+- Domain and IP allowlisting
+- Port-level access control
+- Network namespace isolation
+- Bandwidth throttling capabilities
+
+#### 2. Resource Control Layer
+```rust
+pub struct ResourceLimits {
+    pub cpu: CpuLimits,
+    pub memory: MemoryLimits,
+    pub io: IoLimits,
+    pub process: ProcessLimits,
+    pub network: NetworkLimits,
+}
+```
+
+- CPU usage limits and scheduling controls
+- Memory allocation and swap controls
+- I/O bandwidth and operations throttling
+- Process and thread count restrictions
+- Network bandwidth management
+
+#### 3. Filesystem Security Layer
+```rust
+pub struct FilesystemPolicy {
+    pub root_dir: PathBuf,
+    pub readonly_paths: Vec<PathBuf>,
+    pub hidden_paths: Vec<PathBuf>,
+    pub allowed_paths: Vec<PathBuf>,
+    pub denied_paths: Vec<PathBuf>,
+    pub mount_points: HashMap<PathBuf, MountConfig>,
+    pub tmp_dir: PathBuf,
+    pub max_file_size: u64,
+    pub max_total_size: u64,
+}
+```
+
+- Path-based access control
+- Read-only enforcement
+- Mount point isolation
+- File size restrictions
+- Access tracking and auditing
+
+### Security Implementation Details
+
+#### 1. Container Runtime Integration
+```rust
+pub trait ContainerRuntime: Send + Sync {
+    async fn create_namespaces(&self, config: &NamespaceConfig) -> BlastResult<()>;
+    async fn setup_cgroups(&self, config: &CGroupConfig) -> BlastResult<()>;
+    async fn configure_network(&self, policy: &NetworkPolicy) -> BlastResult<()>;
+    async fn setup_filesystem(&self, policy: &FilesystemPolicy) -> BlastResult<()>;
+    async fn initialize(&self) -> BlastResult<()>;
+    async fn get_state(&self) -> BlastResult<ContainerState>;
+    async fn cleanup(&self) -> BlastResult<()>;
+}
+```
+
+- Namespace isolation (PID, Network, Mount, IPC)
+- CGroup resource controls
+- Network configuration
+- Filesystem setup and isolation
+
+#### 2. State Synchronization
+```rust
+pub struct ContainerState {
+    pub pid: Option<u32>,
+    pub namespaces_created: bool,
+    pub cgroups_configured: bool,
+    pub network_configured: bool,
+    pub filesystem_configured: bool,
+    pub initialized: bool,
+    pub cleaned_up: bool,
+}
+```
+
+- Real-time state tracking
+- Resource usage monitoring
+- Security boundary verification
+- Cleanup and recovery procedures
+
+#### 3. Security Policy Enforcement
+- Network access control through policy-based filtering
+- Resource limits enforcement via CGroups
+- Filesystem access control through mount namespaces
+- Process isolation using PID namespaces
+- Real-time monitoring and violation detection
+
+### Security Best Practices
+1. Default Deny: All access is denied by default and must be explicitly allowed
+2. Principle of Least Privilege: Environments only get the permissions they need
+3. Resource Quotas: All resources are limited by default
+4. Audit Trail: All security-relevant actions are logged
+5. Secure Recovery: Proper cleanup on failure or termination
+
 ## Optimization Strategies
 
 ### Async Operations
