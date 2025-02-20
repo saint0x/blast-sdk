@@ -201,24 +201,48 @@ graph TB
 ## Resource Control Model
 
 ```mermaid
-graph TB
-    subgraph "CGroup Management"
-        CGroup[CGroup Controller] --> CPU[CPU Controller]
-        CGroup --> Memory[Memory Controller]
-        CGroup --> IO[I/O Controller]
-        CGroup --> PID[Process Controller]
-    end
+graph TD
+    A[Blast Core] --> B[Environment Layer]
+    A --> C[Package Layer]
+    A --> D[Security Layer]
     
-    subgraph "Resource Monitoring"
-        Usage[Usage Tracker] --> Limits[Limit Checker]
-        Limits --> Action[Action Trigger]
-        Action --> Enforce[Enforcement]
-    end
+    B --> E[Resource Management]
+    B --> F[State Management]
+    B --> G[Container Runtime]
     
-    subgraph "Quota Management"
-        Quota[Resource Quotas] --> Allocation[Resource Allocation]
-        Allocation --> Recovery[Resource Recovery]
-    end
+    E --> H[CPU Control]
+    E --> I[Memory Control]
+    E --> J[I/O Control]
+    E --> K[Process Control]
+    
+    H --> L[Quota/Period]
+    H --> M[CPU Shares]
+    
+    I --> N[Hard Limits]
+    I --> O[Soft Limits]
+    
+    J --> P[I/O Weight]
+    J --> Q[Bandwidth Limits]
+    
+    D --> R[Filesystem Security]
+    D --> S[Network Security]
+    D --> T[Process Security]
+    
+    R --> U[Mount Validation]
+    R --> V[Access Tracking]
+    R --> W[Error Recovery]
+    
+    U --> X[Path Validation]
+    U --> Y[Mount Options]
+    U --> Z[Recursion Check]
+    
+    V --> AA[Pattern Detection]
+    V --> AB[Violation Logging]
+    V --> AC[Access History]
+    
+    W --> AD[Atomic Operations]
+    W --> AE[State Recovery]
+    W --> AF[Rollback]
 ```
 
 ## Filesystem Security Model
@@ -241,4 +265,32 @@ graph TB
         Track[Access Tracking] --> Audit[Audit Log]
         Audit --> Verify[Access Verification]
     end
+```
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Blast
+    participant ResourceMgr
+    participant FSecurity
+    participant Container
+
+    User->>Blast: Create Environment
+    Blast->>ResourceMgr: Initialize Limits
+    ResourceMgr->>Container: Apply Resource Controls
+    
+    Note over ResourceMgr: CPU Quota/Period
+    Note over ResourceMgr: Memory Limits
+    Note over ResourceMgr: I/O Controls
+    
+    Blast->>FSecurity: Setup Security
+    FSecurity->>Container: Configure Mounts
+    FSecurity->>Container: Setup Access Tracking
+    
+    Note over FSecurity: Validate Mounts
+    Note over FSecurity: Monitor Access
+    Note over FSecurity: Track Violations
+    
+    Container-->>Blast: Environment Ready
+    Blast-->>User: Environment Active
 ```

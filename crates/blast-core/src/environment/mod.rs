@@ -5,7 +5,7 @@ pub mod isolation;
 pub mod resources;
 pub mod security;
 mod state;
-mod package;
+pub mod package;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,6 +14,9 @@ use uuid::Uuid;
 use crate::error::BlastResult;
 use crate::package::Package;
 use crate::python::PythonVersion;
+use crate::version::VersionConstraint;
+use std::collections::HashMap;
+use crate::metadata::PackageMetadata;
 
 // Import state types
 use state::{
@@ -23,9 +26,14 @@ use state::{
 };
 
 // Import package types
-use package::{
+pub use package::{
     PackageOperation,
     PackageLayer,
+    PackageConfig,
+    PackageState,
+    DependencyGraph,
+    Version,
+    Dependency,
 };
 
 // Import resource types
@@ -57,9 +65,6 @@ pub use state::{
     NetworkUsage,
     SecurityState,
 };
-
-pub use package::
-    DependencyGraph;
 
 /// Core trait for environment management
 #[async_trait::async_trait]
@@ -167,7 +172,12 @@ impl Environment for EnvironmentImpl {
         // Create package operation
         let op = PackageOperation::Install {
             name,
-            version: version.map(|v| v.parse()).transpose()?,
+            version: version.map(|v| Version {
+                version: v,
+                released: chrono::Utc::now(),
+                python_requires: None,
+                dependencies: Vec::new(),
+            }),
             dependencies: Vec::new(),
         };
         
@@ -191,9 +201,9 @@ impl Environment for EnvironmentImpl {
         // Get current version
         let state = self.package_manager.get_state().await?;
         let current_version = state.installed.get(&name)
-            .map(|p| p.version().clone())
+            .map(|p| p.version.clone())
             .ok_or_else(|| {
-                crate::error::BlastError::Package(format!(
+                crate::error::BlastError::package(format!(
                     "Package {} not installed",
                     name
                 ))
@@ -203,7 +213,12 @@ impl Environment for EnvironmentImpl {
         let op = PackageOperation::Update {
             name,
             from_version: current_version,
-            to_version: version.parse()?,
+            to_version: Version {
+                version,
+                released: chrono::Utc::now(),
+                python_requires: None,
+                dependencies: Vec::new(),
+            },
         };
         
         // Queue operation
@@ -222,7 +237,38 @@ impl Environment for EnvironmentImpl {
 
     async fn get_packages(&self) -> BlastResult<Vec<Package>> {
         let state = self.package_manager.get_state().await?;
-        Ok(state.installed.values().cloned().collect())
+        let mut packages = Vec::new();
+        
+        for metadata in state.installed.values() {
+            // Create dependencies map for PackageMetadata
+            let deps = metadata.version.dependencies.iter()
+                .map(|d| (d.name.clone(), VersionConstraint::parse(&d.version_constraint).unwrap_or_default()))
+                .collect::<HashMap<String, VersionConstraint>>();
+
+            // Create package metadata
+            let pkg_metadata = crate::metadata::PackageMetadata::new(
+                metadata.version.version.clone(),
+                metadata.version.version.clone(),
+                deps,
+                metadata.version.dependencies.get(0)
+                    .map(|d| VersionConstraint::parse(&d.version_constraint))
+                    .transpose()?
+                    .unwrap_or_default()
+            );
+
+            let pkg = Package::new(
+                metadata.version.version.clone(),
+                metadata.version.version.clone(),
+                pkg_metadata,
+                metadata.version.dependencies.get(0)
+                    .map(|d| VersionConstraint::parse(&d.version_constraint))
+                    .transpose()?
+                    .unwrap_or_default()
+            )?;
+            packages.push(pkg);
+        }
+        
+        Ok(packages)
     }
 
     fn path(&self) -> &PathBuf {
@@ -253,18 +299,27 @@ impl EnvironmentImpl {
         let state_manager = Arc::new(RwLock::new(StateManager::new(state)));
         let resource_manager = Arc::new(ResourceManager::new(config.resource_limits.clone()));
         let security_manager = Arc::new(SecurityManager::new(config.security.clone()));
-        let package_manager = Arc::new(PackageLayer::new(
-            config.python_version.parse()?,
-            config.path.clone(),
-        ).await?);
         
-        // Create container runtime
+        // Create package configuration
+        let package_config = PackageConfig {
+            python_version: config.python_version.clone(),
+            env_path: config.path.clone(),
+            ..PackageConfig::default()
+        };
+        
+        let package_manager = Arc::new(PackageLayer::new(package_config).await?);
+        
+        // Create container configuration
         let container_config = ContainerConfig {
+            network_policy: NetworkPolicy::default(),
+            filesystem_policy: FilesystemPolicy::default(),
             root_dir: config.path.clone(),
             name: config.name.clone(),
             labels: Default::default(),
         };
-        let container = Arc::new(RwLock::new(Box::new(Container::new(&container_config).await?) as Box<dyn ContainerRuntime + Send + Sync>));
+
+        // Initialize container runtime
+        let container = Box::new(Container::new(&container_config).await?) as Box<dyn ContainerRuntime + Send + Sync>;
         
         Ok(Self {
             config,
@@ -272,7 +327,7 @@ impl EnvironmentImpl {
             resource_manager,
             security_manager,
             package_manager,
-            container,
+            container: Arc::new(RwLock::new(container)),
         })
     }
 

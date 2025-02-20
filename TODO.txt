@@ -9,33 +9,6 @@
 - remove test code from prod code... again
 
 Critical Gaps
-    Environment Layer Gaps: [doing]
-        Incomplete container isolation (currently process-level only)
-        Limited resource control enforcement
-        Missing real-time state synchronization
-        Weak sandbox boundary enforcement
-
-
-    Isolation Implementation Gaps:
-        Container/Namespace Features:
-            Implement basic process isolation
-            Add optional namespace support for advanced use cases
-            Implement secure boundary enforcement
-            Add container runtime basics for process management
-
-
-        Resource Management:
-            Implement basic CPU/memory limits
-            Add I/O controls for Python processes
-            Implement process count limitations
-            Add basic resource monitoring
-
-
-        Filesystem Controls:
-            Implement basic path isolation
-            Add read-only path enforcement
-            Implement secure mount point management
-            Add path masking for sensitive directories
 
 
         Optional Future Features:

@@ -8,6 +8,7 @@ use crate::error::BlastResult;
 use super::{
     NamespaceConfig, CGroupConfig, NetworkPolicy, FilesystemPolicy,
     NetworkState, FilesystemState,
+    ConnectionInfo, Protocol, ConnectionState,
 };
 
 /// Container runtime trait
@@ -50,6 +51,11 @@ pub struct Container {
 }
 
 impl Container {
+    /// Get container runtime state
+    pub fn runtime_state(&self) -> Arc<RwLock<ContainerState>> {
+        Arc::clone(&self.state)
+    }
+
     /// Create new container
     pub async fn new(config: &ContainerConfig) -> BlastResult<Self> {
         Ok(Self {
@@ -71,40 +77,106 @@ impl Container {
         &self.root_dir
     }
 
-    /// Get container runtime state
-    pub fn runtime_state(&self) -> &ContainerState {
-        &self.state.read().await
+    /// Get current resource usage
+    pub async fn get_resource_usage(&self) -> BlastResult<ResourceUsage> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::fs;
+            use std::path::Path;
+            
+            let cgroup_path = Path::new("/sys/fs/cgroup/blast").join(&self.id);
+            
+            // Read memory stats
+            let memory_current = fs::read_to_string(
+                cgroup_path.join("memory").join("memory.current")
+            )?.parse::<u64>()?;
+            
+            let memory_peak = fs::read_to_string(
+                cgroup_path.join("memory").join("memory.peak")
+            )?.parse::<u64>()?;
+            
+            // Read CPU stats
+            let cpu_usage = fs::read_to_string(
+                cgroup_path.join("cpu").join("cpu.stat")
+            )?;
+            let cpu_stats: HashMap<String, u64> = cpu_usage
+                .lines()
+                .filter_map(|line| {
+                    let mut parts = line.split_whitespace();
+                    match (parts.next(), parts.next()) {
+                        (Some(key), Some(value)) => {
+                            value.parse().ok().map(|v| (key.to_string(), v))
+                        }
+                        _ => None
+                    }
+                })
+                .collect();
+            
+            // Read I/O stats
+            let io_stats = fs::read_to_string(
+                cgroup_path.join("io").join("io.stat")
+            )?;
+            let io_usage: HashMap<String, u64> = io_stats
+                .lines()
+                .filter_map(|line| {
+                    let mut parts = line.split_whitespace();
+                    Some((
+                        parts.next()?.to_string(),
+                        parts.next()?.parse().ok()?
+                    ))
+                })
+                .collect();
+            
+            // Read process count
+            let pids_current = fs::read_to_string(
+                cgroup_path.join("pids").join("pids.current")
+            )?.parse::<u32>()?;
+            
+            Ok(ResourceUsage {
+                memory_current,
+                memory_peak,
+                cpu_usage: cpu_stats,
+                io_usage,
+                process_count: pids_current,
+                timestamp: std::time::SystemTime::now(),
+            })
+        }
+        
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(ResourceUsage::default())
+        }
     }
 }
 
 #[async_trait]
 impl ContainerRuntime for Container {
-    async fn create_namespaces(&self, config: &NamespaceConfig) -> BlastResult<()> {
+    async fn create_namespaces(&self, _config: &NamespaceConfig) -> BlastResult<()> {
         #[cfg(target_os = "linux")]
         {
             use nix::sched::{CloneFlags, unshare};
             
             let mut flags = CloneFlags::empty();
             
-            if config.mnt {
+            if _config.mnt {
                 flags.insert(CloneFlags::CLONE_NEWNS);
             }
-            if config.pid {
+            if _config.pid {
                 flags.insert(CloneFlags::CLONE_NEWPID);
             }
-            if config.net {
+            if _config.net {
                 flags.insert(CloneFlags::CLONE_NEWNET);
             }
-            if config.ipc {
+            if _config.ipc {
                 flags.insert(CloneFlags::CLONE_NEWIPC);
             }
-            if config.uts {
+            if _config.uts {
                 flags.insert(CloneFlags::CLONE_NEWUTS);
             }
-            if config.user {
+            if _config.user {
                 flags.insert(CloneFlags::CLONE_NEWUSER);
             }
-            if config.cgroup {
+            if _config.cgroup {
                 flags.insert(CloneFlags::CLONE_NEWCGROUP);
             }
             
@@ -118,7 +190,7 @@ impl ContainerRuntime for Container {
         Ok(())
     }
     
-    async fn setup_cgroups(&self, config: &CGroupConfig) -> BlastResult<()> {
+    async fn setup_cgroups(&self, _config: &CGroupConfig) -> BlastResult<()> {
         #[cfg(target_os = "linux")]
         {
             use std::fs;
@@ -129,7 +201,7 @@ impl ContainerRuntime for Container {
             fs::create_dir_all(&cgroup_path)?;
             
             // Set up controllers
-            for controller in &config.controllers {
+            for controller in &_config.controllers {
                 let controller_path = cgroup_path.join(controller);
                 fs::create_dir_all(&controller_path)?;
                 
@@ -138,63 +210,220 @@ impl ContainerRuntime for Container {
                     controller_path.join("tasks"),
                     std::process::id().to_string(),
                 )?;
+
+                // Apply specific controller limits
+                match controller.as_str() {
+                    "memory" => {
+                        // Default to 512MB if no limit specified
+                        let memory_limit = _config.memory_limit
+                            .unwrap_or(512 * 1024 * 1024); // 512MB in bytes
+                        fs::write(
+                            controller_path.join("memory.limit_in_bytes"),
+                            memory_limit.to_string(),
+                        )?;
+                        
+                        // Configure memory swappiness
+                        fs::write(
+                            controller_path.join("memory.swappiness"),
+                            "0", // Disable swapping by default
+                        )?;
+                        
+                        // Set memory soft limit (90% of hard limit)
+                        let soft_limit = ((memory_limit as f64) * 0.9) as u64;
+                        fs::write(
+                            controller_path.join("memory.soft_limit_in_bytes"),
+                            soft_limit.to_string(),
+                        )?;
+                    }
+                    "cpu" => {
+                        // Configure CPU quota (default to 100% of one CPU core)
+                        let cpu_quota = _config.cpu_quota.unwrap_or(100_000);
+                        let cpu_period = _config.cpu_period.unwrap_or(100_000);
+                        
+                        fs::write(
+                            controller_path.join("cpu.cfs_quota_us"),
+                            cpu_quota.to_string(),
+                        )?;
+                        
+                        fs::write(
+                            controller_path.join("cpu.cfs_period_us"),
+                            cpu_period.to_string(),
+                        )?;
+                        
+                        // Set CPU shares for fair scheduling
+                        let cpu_shares = _config.cpu_shares.unwrap_or(1024);
+                        fs::write(
+                            controller_path.join("cpu.shares"),
+                            cpu_shares.to_string(),
+                        )?;
+                    }
+                    "io" => {
+                        // Configure I/O weight (default to 100)
+                        let io_weight = _config.io_weight.unwrap_or(100);
+                        fs::write(
+                            controller_path.join("io.weight"),
+                            io_weight.to_string(),
+                        )?;
+                        
+                        // Set I/O limits if specified
+                        if let Some(limits) = &_config.io_limits {
+                            // Read limits
+                            if let Some(bps) = limits.read_bps_limit {
+                                fs::write(
+                                    controller_path.join("io.max"),
+                                    format!("rbps={}", bps),
+                                )?;
+                            }
+                            // Write limits
+                            if let Some(bps) = limits.write_bps_limit {
+                                fs::write(
+                                    controller_path.join("io.max"),
+                                    format!("wbps={}", bps),
+                                )?;
+                            }
+                        }
+                    }
+                    "pids" => {
+                        // Set process limit (default or configured)
+                        let pids_limit = _config.process_limit.unwrap_or(100);
+                        fs::write(
+                            controller_path.join("pids.max"),
+                            pids_limit.to_string(),
+                        )?;
+                    }
+                    _ => {}
+                }
             }
             
             // Update state
             let mut state = self.state.write().await;
             state.cgroups_configured = true;
+            
+            tracing::info!("CGroups configured for container {} with controllers: {:?}", 
+                self.id, _config.controllers);
         }
         
         Ok(())
     }
     
     async fn configure_network(&self, policy: &NetworkPolicy) -> BlastResult<()> {
-        let mut network = self.network.write().await;
+        // Validate network policy
+        if !policy.allow_outbound && !policy.allow_inbound {
+            tracing::info!("Network access completely disabled for container {}", self.id);
+        }
+
+        // Get network state lock and initialize
+        let network = self.network.write().await;
+        
+        // Track initial network state
+        network.track_connection(ConnectionInfo {
+            source: format!("container:{}", self.id),
+            destination: "host".to_string(),
+            protocol: Protocol::TCP,
+            state: ConnectionState::New,
+            bytes_sent: 0,
+            bytes_received: 0,
+            created_at: std::time::SystemTime::now(),
+            last_activity: std::time::SystemTime::now(),
+        }).await?;
         
         #[cfg(target_os = "linux")]
         {
             use std::process::Command;
             
-            // Create network namespace
-            Command::new("ip")
+            // Create network namespace with error handling
+            if let Err(e) = Command::new("ip")
                 .args(&["netns", "add", &self.id])
-                .status()?;
+                .status()
+            {
+                tracing::error!("Failed to create network namespace: {}", e);
+                return Err(crate::error::BlastError::runtime(format!(
+                    "Failed to create network namespace: {}", e
+                )));
+            }
             
-            // Configure interface
+            // Configure interface if specified
             if let Some(ref config) = policy.interface_config {
-                // Create veth pair
-                Command::new("ip")
-                    .args(&["link", "add", &config.name, "type", "veth", "peer", "name", &format!("{}_h", config.name)])
-                    .status()?;
+                // Create veth pair with error handling
+                if let Err(e) = Command::new("ip")
+                    .args(&["link", "add", &config.name, "type", "veth", "peer", 
+                           "name", &format!("{}_h", config.name)])
+                    .status()
+                {
+                    // Cleanup on failure
+                    let _ = Command::new("ip").args(&["netns", "del", &self.id]).status();
+                    return Err(crate::error::BlastError::runtime(format!(
+                        "Failed to create veth pair: {}", e
+                    )));
+                }
                 
                 // Move interface to namespace
-                Command::new("ip")
+                if let Err(e) = Command::new("ip")
                     .args(&["link", "set", &config.name, "netns", &self.id])
-                    .status()?;
+                    .status()
+                {
+                    // Cleanup on failure
+                    let _ = Command::new("ip").args(&["link", "del", &config.name]).status();
+                    let _ = Command::new("ip").args(&["netns", "del", &self.id]).status();
+                    return Err(crate::error::BlastError::runtime(format!(
+                        "Failed to move interface to namespace: {}", e
+                    )));
+                }
                 
                 // Configure IP if specified
                 if let Some(ref ip) = config.ip_address {
-                    Command::new("ip")
+                    if let Err(e) = Command::new("ip")
                         .args(&["netns", "exec", &self.id, "ip", "addr", "add", ip, "dev", &config.name])
-                        .status()?;
+                        .status()
+                    {
+                        // Cleanup on failure
+                        let _ = Command::new("ip").args(&["netns", "del", &self.id]).status();
+                        return Err(crate::error::BlastError::runtime(format!(
+                            "Failed to configure IP address: {}", e
+                        )));
+                    }
                 }
                 
                 // Set interface up
-                Command::new("ip")
+                if let Err(e) = Command::new("ip")
                     .args(&["netns", "exec", &self.id, "ip", "link", "set", &config.name, "up"])
-                    .status()?;
+                    .status()
+                {
+                    // Cleanup on failure
+                    let _ = Command::new("ip").args(&["netns", "del", &self.id]).status();
+                    return Err(crate::error::BlastError::runtime(format!(
+                        "Failed to bring up interface: {}", e
+                    )));
+                }
+
+                // Configure bandwidth limits if specified
+                if let Some(limit) = policy.bandwidth_limit {
+                    if let Err(e) = Command::new("tc")
+                        .args(&["qdisc", "add", "dev", &config.name, "root", "tbf", 
+                               "rate", &format!("{}bit", limit * 8),
+                               "latency", "50ms", "burst", "1540"])
+                        .status()
+                    {
+                        tracing::warn!("Failed to set bandwidth limit: {}", e);
+                    }
+                }
+
+                // Update bandwidth tracking
+                network.update_bandwidth(0, 0).await?;
             }
             
             // Update state
             let mut state = self.state.write().await;
             state.network_configured = true;
+            
+            tracing::info!("Network configured for container {} with policy: {:?}", self.id, policy);
         }
         
         Ok(())
     }
     
     async fn setup_filesystem(&self, policy: &FilesystemPolicy) -> BlastResult<()> {
-        let mut fs = self.filesystem.write().await;
+        let fs = self.filesystem.write().await;
         
         // Create root directory
         std::fs::create_dir_all(&policy.root_dir)?;
@@ -238,8 +467,9 @@ impl ContainerRuntime for Container {
         
         // Cleanup mounts
         let fs = self.filesystem.read().await;
-        for mount_point in fs.policy.mount_points.keys() {
-            fs.unmount(mount_point).await?;
+        let mount_points = fs.get_mount_points().await?;
+        for mount_point in mount_points {
+            fs.unmount(&mount_point).await?;
         }
         
         // Cleanup cgroups
@@ -304,6 +534,36 @@ pub struct ContainerState {
     pub initialized: bool,
     /// Container cleaned up
     pub cleaned_up: bool,
+}
+
+/// Resource usage statistics
+#[derive(Debug, Clone)]
+pub struct ResourceUsage {
+    /// Current memory usage in bytes
+    pub memory_current: u64,
+    /// Peak memory usage in bytes
+    pub memory_peak: u64,
+    /// CPU usage statistics
+    pub cpu_usage: HashMap<String, u64>,
+    /// I/O usage statistics
+    pub io_usage: HashMap<String, u64>,
+    /// Current process count
+    pub process_count: u32,
+    /// Timestamp of the measurement
+    pub timestamp: std::time::SystemTime,
+}
+
+impl Default for ResourceUsage {
+    fn default() -> Self {
+        Self {
+            memory_current: 0,
+            memory_peak: 0,
+            cpu_usage: HashMap::new(),
+            io_usage: HashMap::new(),
+            process_count: 0,
+            timestamp: std::time::SystemTime::now(),
+        }
+    }
 }
 
 #[cfg(test)]

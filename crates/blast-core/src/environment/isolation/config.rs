@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use super::{NetworkPolicy, FilesystemPolicy};
 
@@ -48,28 +47,52 @@ impl Default for NamespaceConfig {
     }
 }
 
+/// I/O limits configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IoLimits {
+    /// Read bandwidth limit in bytes per second
+    pub read_bps_limit: Option<u64>,
+    /// Write bandwidth limit in bytes per second
+    pub write_bps_limit: Option<u64>,
+}
+
 /// CGroup configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CGroupConfig {
-    /// CGroup version (v1 or v2)
-    pub version: u8,
-    /// CGroup path
-    pub path: PathBuf,
-    /// Controller configuration
+    /// List of enabled controllers
     pub controllers: Vec<String>,
+    /// Memory limit in bytes
+    pub memory_limit: Option<u64>,
+    /// Process limit
+    pub process_limit: Option<u32>,
+    /// CPU quota in microseconds
+    pub cpu_quota: Option<u64>,
+    /// CPU period in microseconds
+    pub cpu_period: Option<u64>,
+    /// CPU shares (relative weight)
+    pub cpu_shares: Option<u64>,
+    /// I/O weight (1-10000)
+    pub io_weight: Option<u32>,
+    /// I/O limits configuration
+    pub io_limits: Option<IoLimits>,
 }
 
 impl Default for CGroupConfig {
     fn default() -> Self {
         Self {
-            version: 2,
-            path: PathBuf::from("/sys/fs/cgroup/blast"),
             controllers: vec![
-                "cpu".to_string(),
                 "memory".to_string(),
+                "cpu".to_string(),
                 "io".to_string(),
                 "pids".to_string(),
             ],
+            memory_limit: None,
+            process_limit: None,
+            cpu_quota: None,
+            cpu_period: None,
+            cpu_shares: None,
+            io_weight: None,
+            io_limits: None,
         }
     }
 }

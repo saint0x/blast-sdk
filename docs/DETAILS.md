@@ -250,27 +250,60 @@ Key Features:
 The resource control layer manages system resource allocation and limits:
 
 ```rust
-pub struct ResourceManager {
-    limits: ResourceLimits,
-    usage: Arc<RwLock<ResourceUsage>>,
-    update_interval: Duration,
+pub struct ResourceLimits {
+    // CPU Management
+    cpu_quota: Option<u64>,      // CPU quota in microseconds
+    cpu_period: Option<u64>,     // CPU period in microseconds
+    cpu_shares: Option<u64>,     // CPU shares (relative weight)
+    
+    // Memory Management
+    memory_limit: Option<u64>,   // Hard memory limit in bytes
+    memory_soft_limit: Option<u64>, // Soft memory limit (90% of hard)
+    
+    // I/O Management
+    io_weight: Option<u32>,      // I/O scheduling weight
+    io_limits: Option<IoLimits>, // Read/Write bandwidth limits
+    
+    // Process Management
+    process_limit: Option<u32>,  // Maximum number of processes
 }
 
-pub struct ResourceLimits {
-    cpu: CpuLimits,
-    memory: MemoryLimits,
-    io: IoLimits,
-    process: ProcessLimits,
-    network: NetworkLimits,
+pub struct IoLimits {
+    read_bps_limit: Option<u64>,  // Read bandwidth limit in bytes per second
+    write_bps_limit: Option<u64>, // Write bandwidth limit in bytes per second
 }
 ```
 
-Implementation Details:
-- CPU scheduling and usage limits
-- Memory allocation and swap controls
-- I/O bandwidth and operations throttling
-- Process and thread count restrictions
+Key Features:
+- Fine-grained CPU quota and period control
+- Relative CPU scheduling with shares
+- Hard and soft memory limits with automatic scaling
+- I/O bandwidth control with read/write limits
+- Process count restrictions
 - Real-time resource usage monitoring
+- Automatic resource cleanup
+
+The implementation includes:
+1. **CPU Management**:
+   - Quota-based CPU time allocation
+   - Period-based scheduling control
+   - Fair-share scheduling with CPU shares
+   
+2. **Memory Control**:
+   - Hard limits for maximum memory usage
+   - Soft limits for graceful degradation
+   - Automatic calculation of soft limits
+   
+3. **I/O Control**:
+   - Weight-based I/O scheduling
+   - Read bandwidth limitations
+   - Write bandwidth limitations
+   - Per-device I/O monitoring
+
+4. **Process Management**:
+   - Process count limitations
+   - Thread grouping and tracking
+   - Resource usage aggregation
 
 ### 3. Filesystem Security Layer
 
