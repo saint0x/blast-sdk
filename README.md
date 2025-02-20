@@ -1,97 +1,145 @@
-# Blast - Intelligent Python Environment Manager
+# Blast: Modern Python Environment Manager
 
-Blast is a powerful Python environment manager that provides seamless environment activation and robust dependency management, powered by a persistent daemon for enhanced performance.
-
-## Quick Start
-
-1. Add blast to your shell configuration:
-
-```bash
-# Add to your ~/.bashrc, ~/.zshrc, or equivalent:
-blast() {
-    if [ "$1" = "start" ]; then
-        eval "$(blast-cli start "${@:2}")"
-    else
-        blast-cli "$@"
-    fi
-}
-```
-
-2. Create and activate a new environment:
-
-```bash
-blast start my-project
-```
-
-Your prompt will change to `(blast:my-project)`, indicating that you're now working in the blast environment.
-
-3. To deactivate the environment:
-
-```bash
-blast deactivate
-```
+Blast is a high-performance Python environment manager written in Rust that reimagines the traditional venv workflow. It implements a two-layer synchronization architecture where the environment state layer manages containerization and isolation, while the package management layer handles real-time dependency synchronization.
 
 ## Features
 
-- **Seamless Environment Activation**: Just like Python's venv, blast provides a smooth activation experience with `(blast)` prompt indication
-- **Persistent Daemon**: Background process handles environment management and caching for improved performance
-- **Robust State Management**: Automatic state persistence and recovery
-- **Multi-Shell Support**: Works with bash, zsh, fish, and PowerShell
-- **Security First**: Isolated environments with configurable security policies
+### Core Features
+- **Two-Layer Architecture**
+  - Environment State Layer: Manages containerization and isolation
+  - Package Management Layer: Handles real-time package management
+- **Real-time Dependency Management**
+  - Live pip operation interception
+  - Automatic dependency resolution
+  - Version conflict detection and resolution
+- **State Management**
+  - Transaction-based state updates
+  - State history tracking
+  - Rollback capabilities
+- **Security**
+  - Network isolation
+  - Resource limits
+  - Filesystem security
+  - Process isolation
 
-## Commands
+### Package Layer
+- Real-time pip operation interception
+- Live dependency graph updates
+- Enhanced version conflict resolution
+- Robust package state persistence
+- Transaction-based updates
+- State history tracking
 
-- `blast start [name]`: Create and activate a new environment
-- `blast deactivate`: Deactivate the current environment
-- `blast list`: List available environments
-- `blast check`: Check environment status
-- `blast clean`: Clean environment cache
-- `blast save`: Save environment state
-- `blast load`: Load saved environment
+### Integration Layer
+- Layer coordination
+- Automatic conflict resolution
+- Transaction management
+- Error recovery system
+- Metrics collection
+- State synchronization
 
-## How It Works
+### Shell Integration
+- Multi-shell support (bash, zsh, fish)
+- Clean ANSI handling
+- Proper prompt management
+- Environment variable tracking
+- Cross-platform compatibility
 
-Blast uses a similar approach to Python's venv for environment activation:
+## Implementation Status
 
-1. When you run `blast start`, the command:
-   - Creates the environment if it doesn't exist
-   - Starts a background daemon for environment management
-   - Outputs shell commands that modify your current shell's environment
-   - Updates your prompt to show the active environment
+### Completed
+- Basic package state management
+- Initial pip operation interception
+- Simple dependency graph updates
+- Basic conflict checking
+- State persistence (save/load)
+- Shell integration basics
+- Environment isolation foundation
 
-2. The daemon continues running in the background, handling:
-   - Package installations and updates
-   - Environment state management
-   - Resource monitoring
-   - Cache management
+### In Progress
+- Real-time pip operation handling
+- Live dependency graph updates
+- Enhanced conflict resolution
+- Transaction-based state management
+- Layer coordination improvements
+- Automatic conflict resolution
+- Error recovery system
 
-3. All environment changes are transactional and can be rolled back if needed.
+### Planned
+- State history tracking
+- Advanced rollback capabilities
+- More sophisticated resolution strategies
+- Enhanced error recovery mechanisms
+- Improved layer coordination
+- Better transaction management
+- PowerShell support
+- Windows compatibility improvements
 
-4. When you run `blast deactivate`, it:
-   - Restores your original shell environment
-   - Cleans up temporary files
-   - Signals the daemon to stop monitoring (if no other environments are active)
+## Usage
+
+```bash
+# Create and activate a new environment
+blast start [options]
+
+# Deactivate and clean up environment
+blast kill
+
+# View environment status
+blast status
+
+# List installed packages
+blast list
+
+# Install packages
+blast install <package>
+
+# Update packages
+blast update [package]
+
+# Remove packages
+blast remove <package>
+```
 
 ## Architecture
 
-Blast uses a client-server architecture:
+### Core Components
+- **blast-core**: Core functionality and types
+- **blast-cli**: Command-line interface
+- **blast-daemon**: Background service
 
-1. **blast-cli**: Command-line interface for user interaction
-2. **blast-daemon**: Background service for environment management
-3. **blast-core**: Core functionality and state management
-4. **blast-sync**: Synchronization primitives
-5. **blast-cache**: Caching layer
-6. **blast-resolver**: Dependency resolution
-7. **blast-image**: Environment image management
+### Key Features
+1. **Environment Management**
+   - Robust activation/deactivation
+   - State persistence
+   - Clean ANSI handling
 
-## Development
+2. **Package Management**
+   - Real-time operation handling
+   - Dependency resolution
+   - Conflict management
 
-To build from source:
+3. **Security**
+   - Network isolation
+   - Resource limits
+   - Filesystem security
 
-```bash
-cargo build --release
-```
+## Development Status
+
+Blast is currently in active development. The core functionality is implemented and working, with ongoing work on advanced features and improvements.
+
+### Current Focus
+1. Real-time pip operation handling
+2. Live dependency graph updates
+3. Enhanced conflict resolution
+4. Transaction-based state management
+5. Layer coordination improvements
+6. Automatic conflict resolution
+7. Error recovery capabilities
+
+## Contributing
+
+Contributions are welcome! Please read our contributing guidelines and code of conduct before submitting pull requests.
 
 ## License
 
-[Insert your license information here] 
+MIT License - see LICENSE for details 
