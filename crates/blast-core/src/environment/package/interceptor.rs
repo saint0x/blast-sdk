@@ -9,9 +9,13 @@ pub enum PipOperation {
     /// Install packages
     Install {
         packages: Vec<String>,
+        #[allow(dead_code)]
         upgrade: bool,
+        #[allow(dead_code)]
         editable: bool,
+        #[allow(dead_code)]
         requirements: Option<String>,
+        #[allow(dead_code)]
         constraints: Option<String>,
     },
     /// Uninstall packages
@@ -20,6 +24,7 @@ pub enum PipOperation {
     },
     /// List packages
     List {
+        #[allow(dead_code)]
         outdated: bool,
     },
     /// Show package info
@@ -29,11 +34,14 @@ pub enum PipOperation {
     /// Download packages
     Download {
         packages: Vec<String>,
+        #[allow(dead_code)]
         dest: Option<String>,
     },
     /// Config operations
     Config {
+        #[allow(dead_code)]
         action: String,
+        #[allow(dead_code)]
         options: HashMap<String, String>,
     },
 }
@@ -41,6 +49,7 @@ pub enum PipOperation {
 /// Pip interceptor implementation
 pub struct PipInterceptor {
     /// Configuration
+    #[allow(dead_code)]
     config: PackageConfig,
     /// Operation sender
     operation_tx: mpsc::Sender<PackageOperation>,
