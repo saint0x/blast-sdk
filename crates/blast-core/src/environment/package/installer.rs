@@ -206,10 +206,12 @@ enum InstallationStep {
     /// Update existing package
     Update {
         name: String,
+        #[allow(dead_code)]
         from: String,
         to: String,
     },
     /// Remove package
+    #[allow(dead_code)]
     Remove {
         name: String,
     },

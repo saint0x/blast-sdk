@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use crate::error::BlastResult;
 use super::{Version, DependencyGraph};
+use std::time::SystemTime;
+use std::path::Path;
 
-/// Package metadata
+/// Package information
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackageMetadata {
+pub struct PackageInfo {
     /// Package version
     pub version: Version,
     /// Installation time
@@ -23,24 +25,34 @@ pub struct PackageMetadata {
 }
 
 /// Package state
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageState {
     /// Installed packages
-    pub installed: HashMap<String, PackageMetadata>,
+    pub installed: HashMap<String, PackageInfo>,
     /// Last update check
     pub last_check: Option<chrono::DateTime<chrono::Utc>>,
     /// State version
     pub version: u32,
+    /// Last modification time
+    #[serde(skip, default = "SystemTime::now")]
+    pub last_modified: SystemTime,
 }
 
-impl PackageState {
-    /// Create new package state
-    pub fn new() -> Self {
+impl Default for PackageState {
+    fn default() -> Self {
         Self {
             installed: HashMap::new(),
             last_check: None,
             version: 1,
+            last_modified: SystemTime::now(),
         }
+    }
+}
+
+impl PackageState {
+    /// Create a new package state
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Update state from dependency graph
@@ -49,7 +61,7 @@ impl PackageState {
         
         // Update installed packages
         for node in graph.nodes() {
-            let metadata = PackageMetadata {
+            let metadata = PackageInfo {
                 version: Version {
                     version: node.version.clone(),
                     released: now,
@@ -145,21 +157,22 @@ impl PackageState {
         })
     }
 
+    /// Get last modification time
+    pub fn last_modified(&self) -> SystemTime {
+        self.last_modified
+    }
+
     /// Save state to file
-    pub async fn save(&self, path: &std::path::Path) -> BlastResult<()> {
-        // Serialize to string first
+    pub async fn save(&self, path: &Path) -> BlastResult<()> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| crate::error::BlastError::package(format!(
                 "Failed to serialize package state: {}", e
             )))?;
         
-        // Write to file
         tokio::fs::write(path, json).await
             .map_err(|e| crate::error::BlastError::package(format!(
                 "Failed to save package state: {}", e
-            )))?;
-        
-        Ok(())
+            )))
     }
 
     /// Load state from file
@@ -177,5 +190,12 @@ impl PackageState {
             )))?;
         
         Ok(state)
+    }
+
+    /// Update package metadata
+    pub async fn update_package_metadata(&mut self, metadata: &PackageInfo) -> BlastResult<()> {
+        self.installed.insert(metadata.version.version.clone(), metadata.clone());
+        self.last_modified = SystemTime::now();
+        Ok(())
     }
 } 

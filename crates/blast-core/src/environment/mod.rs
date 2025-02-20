@@ -16,7 +16,6 @@ use crate::package::Package;
 use crate::python::PythonVersion;
 use crate::version::VersionConstraint;
 use std::collections::HashMap;
-use crate::metadata::PackageMetadata;
 
 // Import state types
 use state::{
