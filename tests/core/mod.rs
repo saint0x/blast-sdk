@@ -11,3 +11,4 @@ mod diagnostics_test;
 mod version_history_test;
 mod security_test;
 mod sync_test;
+mod scheduler_test;

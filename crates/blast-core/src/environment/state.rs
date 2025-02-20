@@ -98,6 +98,8 @@ pub struct PackageState {
     pub constraints: Vec<String>,
     /// Package sources
     pub sources: Vec<String>,
+    /// Package metadata
+    pub packages: HashMap<String, PackageInfo>,
 }
 
 /// Package information
@@ -109,8 +111,18 @@ pub struct PackageInfo {
     pub version: String,
     /// Installation time
     pub installed_at: SystemTime,
+    /// Last update time
+    pub updated_at: SystemTime,
     /// Dependencies
     pub dependencies: Vec<String>,
+    /// Whether package is direct dependency
+    pub direct: bool,
+    /// Package hash
+    pub hash: String,
+    /// Package size in bytes
+    pub size: u64,
+    /// Package source
+    pub source: String,
 }
 
 /// Container state
@@ -323,6 +335,7 @@ impl StateManager {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    use crate::python::PythonVersion;
 
     #[tokio::test]
     async fn test_environment_state() {
@@ -384,19 +397,22 @@ mod tests {
 
         // Test updating package state
         manager.update_package_state(|state| {
-            state.installed.insert(
-                "test-package".to_string(),
-                PackageInfo {
-                    name: "test-package".to_string(),
-                    version: "1.0.0".to_string(),
-                    installed_at: SystemTime::now(),
-                    dependencies: Vec::new(),
-                },
-            );
+            let pkg_info = PackageInfo {
+                name: "test-package".to_string(),
+                version: "1.0.0".to_string(),
+                installed_at: SystemTime::now(),
+                updated_at: SystemTime::now(),
+                dependencies: Vec::new(),
+                direct: true,
+                hash: "test-hash".to_string(),
+                size: 0,
+                source: String::new(),
+            };
+            state.packages.insert("test-package".to_string(), pkg_info);
             Ok(())
         }).await.unwrap();
 
         let state = manager.get_state().await.unwrap();
-        assert!(state.package_state.installed.contains_key("test-package"));
+        assert!(state.package_state.packages.contains_key("test-package"));
     }
 } 

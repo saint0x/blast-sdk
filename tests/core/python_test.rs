@@ -5,6 +5,8 @@ use blast_core::python::{PythonVersion, PythonEnvironment};
 use blast_core::package::Package;
 use blast_core::version::VersionConstraint;
 use blast_core::metadata::PackageMetadata;
+use blast_core::environment::package::Version;
+use chrono::Utc;
 
 fn create_package_metadata(
     name: String,
@@ -41,12 +43,13 @@ fn test_python_version_compatibility() {
     assert!(!v1.is_compatible_with(&v4));
 }
 
-#[test]
-fn test_environment_management() {
+#[tokio::test]
+async fn test_environment_management() {
     let mut env = PythonEnvironment::new(
+        "test-env".to_string(),
         PathBuf::from("/tmp/test-env"),
         PythonVersion::from_str("3.8").unwrap(),
-    );
+    ).await.unwrap();
 
     let package = Package::new(
         "test-package".to_string(),
@@ -60,11 +63,13 @@ fn test_environment_management() {
         VersionConstraint::any(),
     ).unwrap();
 
-    env.add_package(package.clone());
-    assert_eq!(env.packages.len(), 1);
+    env.install_package(package.name().to_string(), Some(package.version().to_string())).await.unwrap();
+    let packages = env.get_packages().await.unwrap();
+    assert_eq!(packages.len(), 1);
 
-    env.remove_package(&package);
-    assert_eq!(env.packages.len(), 0);
+    env.uninstall_package(package.name().to_string()).await.unwrap();
+    let packages = env.get_packages().await.unwrap();
+    assert_eq!(packages.len(), 0);
 }
 
 #[tokio::test]

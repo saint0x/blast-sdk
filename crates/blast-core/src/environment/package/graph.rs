@@ -2,7 +2,70 @@ use std::collections::{HashMap, HashSet};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::algo::toposort;
 use petgraph::visit::Dfs;
+use tokio::sync::broadcast;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use super::Dependency;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::path::Path;
+use chrono::{DateTime, Utc};
+use std::error::Error;
+use std::fmt;
+
+#[derive(Debug)]
+pub enum GraphError {
+    NotifyError(notify::Error),
+    IoError(std::io::Error),
+    Other(String),
+}
+
+impl fmt::Display for GraphError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GraphError::NotifyError(e) => write!(f, "Notify error: {}", e),
+            GraphError::IoError(e) => write!(f, "IO error: {}", e),
+            GraphError::Other(s) => write!(f, "Graph error: {}", s),
+        }
+    }
+}
+
+impl Error for GraphError {}
+
+impl From<notify::Error> for GraphError {
+    fn from(err: notify::Error) -> Self {
+        GraphError::NotifyError(err)
+    }
+}
+
+impl From<std::io::Error> for GraphError {
+    fn from(err: std::io::Error) -> Self {
+        GraphError::IoError(err)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum GraphChange {
+    NodeAdded {
+        name: String,
+        version: String,
+    },
+    NodeRemoved {
+        name: String,
+    },
+    EdgeAdded {
+        from: String,
+        to: String,
+    },
+    EdgeRemoved {
+        from: String,
+        to: String,
+    },
+    NodeUpdated {
+        name: String,
+        old_version: String,
+        new_version: String,
+    },
+}
 
 /// Dependency node information
 #[derive(Debug, Clone)]
@@ -23,6 +86,8 @@ pub struct DependencyNode {
     pub size: u64,
     /// Package source
     pub source: String,
+    /// Last updated timestamp
+    pub last_updated: DateTime<Utc>,
 }
 
 /// Dependency graph implementation
@@ -32,44 +97,165 @@ pub struct DependencyGraph {
     graph: DiGraph<DependencyNode, ()>,
     /// Node indices by package name
     nodes: HashMap<String, NodeIndex>,
+    /// Change broadcaster
+    change_tx: broadcast::Sender<GraphChange>,
+    /// File watcher
+    watcher: Option<RecommendedWatcher>,
+    /// Graph state
+    state: Arc<RwLock<GraphState>>,
+}
+
+#[derive(Debug)]
+struct GraphState {
+    /// Pending changes
+    pending_changes: Vec<GraphChange>,
+    /// Last validation timestamp
+    #[allow(dead_code)]
+    last_validation: DateTime<Utc>,
+    /// Validation status
+    #[allow(dead_code)]
+    is_valid: bool,
+}
+
+impl Default for GraphState {
+    fn default() -> Self {
+        Self {
+            pending_changes: Vec::new(),
+            last_validation: Utc::now(),
+            is_valid: false,
+        }
+    }
 }
 
 impl DependencyGraph {
     /// Create new dependency graph
     pub fn new() -> Self {
+        let (tx, _) = broadcast::channel(100);
         Self {
             graph: DiGraph::new(),
             nodes: HashMap::new(),
+            change_tx: tx,
+            watcher: None,
+            state: Arc::new(RwLock::new(GraphState::default())),
         }
     }
 
-    /// Add package to graph
-    pub fn add_package(&mut self, name: &str, version: String) -> NodeIndex {
-        if let Some(&idx) = self.nodes.get(name) {
-            return idx;
-        }
+    /// Subscribe to graph changes
+    pub fn subscribe_changes(&self) -> broadcast::Receiver<GraphChange> {
+        self.change_tx.subscribe()
+    }
+
+    /// Start watching directory for changes
+    pub async fn watch_directory(&mut self, path: &Path) -> Result<(), GraphError> {
+        let tx = self.change_tx.clone();
+        let state = Arc::clone(&self.state);
         
-        let node = DependencyNode {
-            name: name.to_string(),
-            version,
-            current_version: None,
-            dependencies: Vec::new(),
-            direct: false,
-            hash: None,
-            size: 0,
-            source: String::new(),
+        let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            if let Ok(event) = res {
+                let change = match event.kind {
+                    notify::EventKind::Create(_) => Some(GraphChange::NodeAdded {
+                        name: event.paths[0].to_string_lossy().into_owned(),
+                        version: "0.0.0".to_string(), // Placeholder
+                    }),
+                    notify::EventKind::Remove(_) => Some(GraphChange::NodeRemoved {
+                        name: event.paths[0].to_string_lossy().into_owned(),
+                    }),
+                    notify::EventKind::Modify(_) => None, // Handle in detail
+                    _ => None,
+                };
+
+                if let Some(change) = change {
+                    let _ = tx.send(change.clone());
+                    let mut state = futures::executor::block_on(state.write());
+                    state.pending_changes.push(change);
+                }
+            }
+        })?;
+
+        watcher.watch(path, RecursiveMode::Recursive)?;
+        self.watcher = Some(watcher);
+        Ok(())
+    }
+
+    /// Add package to graph with change notification
+    pub fn add_package(&mut self, name: &str, version: String) -> NodeIndex {
+        let idx = if let Some(&idx) = self.nodes.get(name) {
+            // Update existing node
+            let node = &mut self.graph[idx];
+            if node.version != version {
+                let change = GraphChange::NodeUpdated {
+                    name: name.to_string(),
+                    old_version: node.version.clone(),
+                    new_version: version.clone(),
+                };
+                let _ = self.change_tx.send(change);
+                node.version = version;
+                node.last_updated = Utc::now();
+            }
+            idx
+        } else {
+            // Add new node
+            let node = DependencyNode {
+                name: name.to_string(),
+                version: version.clone(),
+                current_version: None,
+                dependencies: Vec::new(),
+                direct: false,
+                hash: None,
+                size: 0,
+                source: String::new(),
+                last_updated: Utc::now(),
+            };
+            
+            let idx = self.graph.add_node(node);
+            self.nodes.insert(name.to_string(), idx);
+            
+            let change = GraphChange::NodeAdded {
+                name: name.to_string(),
+                version,
+            };
+            let _ = self.change_tx.send(change);
+            
+            idx
         };
         
-        let idx = self.graph.add_node(node);
-        self.nodes.insert(name.to_string(), idx);
         idx
     }
 
-    /// Add dependency between packages
+    /// Add dependency between packages with change notification
     pub fn add_dependency(&mut self, from: &str, to: &str) {
         if let (Some(&from_idx), Some(&to_idx)) = (self.nodes.get(from), self.nodes.get(to)) {
             self.graph.add_edge(from_idx, to_idx, ());
+            
+            let change = GraphChange::EdgeAdded {
+                from: from.to_string(),
+                to: to.to_string(),
+            };
+            let _ = self.change_tx.send(change);
         }
+    }
+
+    /// Remove package from graph with change notification
+    pub fn remove_package(&mut self, name: &str) {
+        if let Some(&idx) = self.nodes.get(name) {
+            self.graph.remove_node(idx);
+            self.nodes.remove(name);
+            
+            let change = GraphChange::NodeRemoved {
+                name: name.to_string(),
+            };
+            let _ = self.change_tx.send(change);
+        }
+    }
+
+    /// Get pending changes
+    pub async fn get_pending_changes(&self) -> Vec<GraphChange> {
+        self.state.read().await.pending_changes.clone()
+    }
+
+    /// Clear pending changes
+    pub async fn clear_pending_changes(&self) {
+        self.state.write().await.pending_changes.clear();
     }
 
     /// Get package node

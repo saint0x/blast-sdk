@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use crate::error::BlastResult;
+use crate::error::{BlastResult, BlastError};
 use crate::package::Package;
 use crate::python::PythonVersion;
 use crate::version::VersionConstraint;
@@ -197,21 +197,16 @@ impl Environment for EnvironmentImpl {
     }
 
     async fn update_package(&self, name: String, version: String) -> BlastResult<()> {
-        // Get current version
         let state = self.package_manager.get_state().await?;
-        let current_version = state.installed.get(&name)
-            .map(|p| p.version.clone())
-            .ok_or_else(|| {
-                crate::error::BlastError::package(format!(
-                    "Package {} not installed",
-                    name
-                ))
-            })?;
-        
+        let current_version = state.get_package(&name)
+            .ok_or_else(|| BlastError::package(
+                format!("Package {} not installed", name)
+            ))?;
+
         // Create package operation
         let op = PackageOperation::Update {
             name,
-            from_version: current_version,
+            from_version: current_version.version.clone(),
             to_version: Version {
                 version,
                 released: chrono::Utc::now(),
@@ -238,7 +233,7 @@ impl Environment for EnvironmentImpl {
         let state = self.package_manager.get_state().await?;
         let mut packages = Vec::new();
         
-        for metadata in state.installed.values() {
+        for metadata in state.get_all_packages() {
             // Create dependencies map for PackageMetadata
             let deps = metadata.version.dependencies.iter()
                 .map(|d| (d.name.clone(), VersionConstraint::parse(&d.version_constraint).unwrap_or_default()))
@@ -361,6 +356,21 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    async fn create_test_environment() -> EnvironmentImpl {
+        let temp_dir = TempDir::new().unwrap();
+        
+        let config = EnvironmentConfig {
+            name: "test-env".to_string(),
+            path: temp_dir.path().to_path_buf(),
+            python_version: "3.9".to_string(),
+            isolation: IsolationLevel::Process,
+            resource_limits: ResourceLimits::default(),
+            security: SecurityConfig::default(),
+        };
+        
+        EnvironmentImpl::new(config).await.unwrap()
+    }
+
     #[tokio::test]
     async fn test_environment_creation() {
         let temp_dir = TempDir::new().unwrap();
@@ -388,10 +398,29 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         
         let pkg_state = env.package_manager.get_state().await.unwrap();
-        assert!(pkg_state.installed.contains_key("requests"));
+        assert!(pkg_state.is_installed("requests"));
         
         // Test conflicts
         let conflicts = env.check_package_conflicts().await.unwrap();
         assert!(conflicts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_package_operations() {
+        let env = create_test_environment().await;
+        
+        // Install package
+        env.install_package("requests".to_string(), None).await.unwrap();
+        
+        // Verify package state
+        let pkg_state = env.package_manager.get_state().await.unwrap();
+        assert!(pkg_state.is_installed("requests"));
+        
+        // Uninstall package
+        env.uninstall_package("requests".to_string()).await.unwrap();
+        
+        // Verify package removed
+        let pkg_state = env.package_manager.get_state().await.unwrap();
+        assert!(!pkg_state.is_installed("requests"));
     }
 } 

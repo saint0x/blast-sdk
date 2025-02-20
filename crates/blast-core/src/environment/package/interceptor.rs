@@ -1,10 +1,12 @@
 use std::collections::HashMap;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, broadcast};
 use std::sync::Arc;
 use crate::error::BlastResult;
 use super::{PackageConfig, PackageOperation, Version, DependencyResolver};
+use super::{ProgressTracker, InstallationProgress, InstallationStep};
 use crate::version::VersionConstraint;
 use tokio::fs;
+use std::time::Instant;
 
 /// Pip operation types
 #[derive(Debug, Clone)]
@@ -49,6 +51,23 @@ pub enum PipOperation {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct OperationState {
+    pub operation_id: String,
+    pub operation_type: String,
+    pub start_time: Instant,
+    pub status: OperationStatus,
+    pub details: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum OperationStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Failed(String),
+}
+
 /// Pip interceptor implementation
 pub struct PipInterceptor {
     /// Configuration
@@ -59,19 +78,30 @@ pub struct PipInterceptor {
     operation_rx: Arc<RwLock<mpsc::Receiver<PackageOperation>>>,
     /// Dependency resolver
     resolver: Arc<DependencyResolver>,
+    /// Operation state broadcaster
+    state_tx: broadcast::Sender<OperationState>,
+    /// Active operations
+    active_operations: Arc<RwLock<HashMap<String, OperationState>>>,
+    /// Progress tracker
+    progress_tracker: Arc<ProgressTracker>,
 }
 
 impl PipInterceptor {
     /// Create new pip interceptor
     pub fn new(config: PackageConfig) -> Self {
         let (tx, rx) = mpsc::channel(100);
+        let (state_tx, _) = broadcast::channel(100);
         let resolver = Arc::new(DependencyResolver::new(config.clone()));
+        let progress_tracker = Arc::new(ProgressTracker::new());
         
         let interceptor = Self {
             config,
             operation_tx: tx,
             operation_rx: Arc::new(RwLock::new(rx)),
             resolver,
+            state_tx,
+            active_operations: Arc::new(RwLock::new(HashMap::new())),
+            progress_tracker,
         };
 
         // Spawn background task to process operations
@@ -80,18 +110,60 @@ impl PipInterceptor {
         interceptor
     }
 
+    /// Subscribe to operation state updates
+    pub fn subscribe_state_updates(&self) -> broadcast::Receiver<OperationState> {
+        self.state_tx.subscribe()
+    }
+
     /// Spawn background operation processor
     fn spawn_operation_processor(&self) {
         let rx = Arc::clone(&self.operation_rx);
         let resolver = Arc::clone(&self.resolver);
         let config = self.config.clone();
+        let state_tx = self.state_tx.clone();
+        let active_ops = Arc::clone(&self.active_operations);
+        let progress_tracker = Arc::clone(&self.progress_tracker);
 
         tokio::spawn(async move {
             let mut rx = rx.write().await;
             while let Some(op) = rx.recv().await {
-                if let Err(e) = Self::process_operation(op, &resolver, &config).await {
-                    tracing::error!("Failed to process package operation: {}", e);
-                }
+                let op_id = uuid::Uuid::new_v4().to_string();
+                let op_type = format!("{:?}", op);
+                let op_state = OperationState {
+                    operation_id: op_id.clone(),
+                    operation_type: op_type.clone(),
+                    start_time: Instant::now(),
+                    status: OperationStatus::Pending,
+                    details: HashMap::new(),
+                };
+
+                // Update state
+                active_ops.write().await.insert(op_id.clone(), op_state.clone());
+                let _ = state_tx.send(op_state);
+
+                // Process operation
+                let result = Self::process_operation(op, &resolver, &progress_tracker, &config).await;
+                
+                // Update final state
+                let final_state = match result {
+                    Ok(()) => OperationState {
+                        operation_id: op_id.clone(),
+                        operation_type: op_type.clone(),
+                        start_time: Instant::now(),
+                        status: OperationStatus::Completed,
+                        details: HashMap::new(),
+                    },
+                    Err(e) => OperationState {
+                        operation_id: op_id.clone(),
+                        operation_type: op_type,
+                        start_time: Instant::now(),
+                        status: OperationStatus::Failed(e.to_string()),
+                        details: HashMap::new(),
+                    },
+                };
+
+                active_ops.write().await.insert(op_id.clone(), final_state.clone());
+                let _ = state_tx.send(final_state);
             }
         });
     }
@@ -100,32 +172,112 @@ impl PipInterceptor {
     async fn process_operation(
         op: PackageOperation,
         resolver: &DependencyResolver,
+        progress_tracker: &ProgressTracker,
         _config: &PackageConfig,
     ) -> BlastResult<()> {
         match op {
-            PackageOperation::Install { name, version, .. } => {
-                // Resolve dependencies recursively
-                let deps = resolver.resolve_dependencies(&name, version.as_ref(), &[]).await?;
+            PackageOperation::Install { name, version, dependencies } => {
+                // Start tracking progress
+                let op_id = progress_tracker.start_operation(name.clone()).await;
                 
-                // Install all dependencies in correct order
-                for dep_node in deps.installation_order() {
+                // Update progress for dependency resolution
+                progress_tracker.update_operation(
+                    &op_id,
+                    InstallationStep::ResolvingDependencies,
+                    0.2,
+                    "Resolving dependencies",
+                ).await;
+
+                // Resolve dependencies recursively with real-time updates
+                let deps = match resolver.resolve_dependencies(&name, version.as_ref(), &dependencies).await {
+                    Ok(deps) => {
+                        progress_tracker.update_operation(
+                            &op_id,
+                            InstallationStep::ValidatingGraph,
+                            0.4,
+                            "Validating dependency graph",
+                        ).await;
+                        deps
+                    }
+                    Err(e) => {
+                        progress_tracker.fail_operation(
+                            &op_id,
+                            format!("Failed to resolve dependencies: {}", e),
+                        ).await;
+                        return Err(e);
+                    }
+                };
+                
+                // Install all dependencies in correct order with progress tracking
+                let total_deps = deps.installation_order().len();
+                for (idx, dep_node) in deps.installation_order().iter().enumerate() {
+                    let progress = 0.4 + (0.6 * (idx as f32 / total_deps as f32));
+                    
+                    progress_tracker.update_operation(
+                        &op_id,
+                        InstallationStep::Installing,
+                        progress,
+                        format!("Installing dependency: {}", dep_node.name),
+                    ).await;
+                    
                     tracing::info!("Installing dependency: {}", dep_node.name);
-                    // TODO: Actual package installation
+                    // TODO: Implement actual package installation
                 }
+                
+                progress_tracker.complete_operation(&op_id).await;
             }
             PackageOperation::Uninstall { name } => {
+                let op_id = progress_tracker.start_operation(name.clone()).await;
+                
                 // Check for reverse dependencies before uninstalling
-                let state = resolver.get_state().await?;
+                progress_tracker.update_operation(
+                    &op_id,
+                    InstallationStep::ValidatingGraph,
+                    0.3,
+                    "Checking dependencies",
+                ).await;
+
+                let state = match resolver.get_state().await {
+                    Ok(state) => state,
+                    Err(e) => {
+                        progress_tracker.fail_operation(
+                            &op_id,
+                            format!("Failed to get package state: {}", e),
+                        ).await;
+                        return Err(e);
+                    }
+                };
+
                 if !state.can_remove(&name) {
-                    return Err(crate::error::BlastError::package(
-                        format!("Cannot remove {}: other packages depend on it", name)
-                    ));
+                    let error = format!("Cannot remove {}: other packages depend on it", name);
+                    progress_tracker.fail_operation(&op_id, &error).await;
+                    return Err(crate::error::BlastError::package(error));
                 }
-                // TODO: Actual package uninstallation
+
+                progress_tracker.update_operation(
+                    &op_id,
+                    InstallationStep::Installing,
+                    0.6,
+                    "Uninstalling package",
+                ).await;
+
+                // TODO: Implement actual package uninstallation
+                
+                progress_tracker.complete_operation(&op_id).await;
             }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Get operation status
+    pub async fn get_operation_status(&self, operation_id: &str) -> Option<OperationState> {
+        self.active_operations.read().await.get(operation_id).cloned()
+    }
+
+    /// Get all active operations
+    pub async fn get_active_operations(&self) -> Vec<OperationState> {
+        self.active_operations.read().await.values().cloned().collect()
     }
 
     /// Parse requirement file
@@ -398,5 +550,15 @@ impl PipInterceptor {
                 Ok(Vec::new())
             }
         }
+    }
+
+    /// Subscribe to progress updates
+    pub fn subscribe_progress(&self) -> broadcast::Receiver<InstallationProgress> {
+        self.progress_tracker.subscribe()
+    }
+
+    /// Get progress for operation
+    pub async fn get_operation_progress(&self, operation_id: &str) -> Option<InstallationProgress> {
+        self.progress_tracker.get_progress(operation_id).await
     }
 } 

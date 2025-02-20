@@ -4,6 +4,36 @@ use crate::error::BlastResult;
 use super::{PackageConfig, Version, Dependency, DependencyGraph, PackageState, PackageInfo};
 use std::path::Path;
 use crate::version::VersionConstraint;
+use tokio::sync::RwLock;
+use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct VersionConflict {
+    pub package: String,
+    pub required_versions: Vec<Version>,
+    pub requiring_packages: HashMap<String, VersionReq>,
+    pub resolution_strategy: ConflictResolutionStrategy,
+}
+
+#[derive(Debug, Clone)]
+pub enum ConflictResolutionStrategy {
+    UseLatest,
+    UseMinimum,
+    UseMaximumSatisfying,
+    ForceVersion(Version),
+    Skip,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct ResolutionContext {
+    visited: HashSet<String>,
+    depth: usize,
+    max_depth: usize,
+    conflicts: Vec<VersionConflict>,
+    resolution_strategies: HashMap<String, ConflictResolutionStrategy>,
+}
 
 /// Dependency resolver implementation
 pub struct DependencyResolver {
@@ -13,6 +43,8 @@ pub struct DependencyResolver {
     cache: HashMap<String, Vec<Version>>,
     /// Current package state
     state: PackageState,
+    /// Resolution context
+    context: Arc<RwLock<ResolutionContext>>,
 }
 
 impl DependencyResolver {
@@ -22,7 +54,155 @@ impl DependencyResolver {
             config,
             cache: HashMap::new(),
             state: PackageState::new(),
+            context: Arc::new(RwLock::new(ResolutionContext {
+                visited: HashSet::new(),
+                depth: 0,
+                max_depth: 100, // Configurable
+                conflicts: Vec::new(),
+                resolution_strategies: HashMap::new(),
+            })),
         }
+    }
+
+    /// Set conflict resolution strategy
+    pub async fn set_resolution_strategy(&self, package: &str, strategy: ConflictResolutionStrategy) {
+        let mut context = self.context.write().await;
+        context.resolution_strategies.insert(package.to_string(), strategy);
+    }
+
+    /// Resolve version conflicts
+    #[allow(dead_code)]
+    async fn resolve_conflicts(&self, conflicts: &[VersionConflict]) -> BlastResult<HashMap<String, Version>> {
+        let mut resolutions = HashMap::new();
+        
+        for conflict in conflicts {
+            let strategy = self.get_resolution_strategy(conflict).await;
+            let resolved_version = match strategy {
+                ConflictResolutionStrategy::UseLatest => {
+                    // Get latest version that satisfies all constraints
+                    self.find_latest_satisfying_version(&conflict.package, &conflict.requiring_packages)?
+                }
+                ConflictResolutionStrategy::UseMinimum => {
+                    // Get minimum version that satisfies all constraints
+                    self.find_minimum_satisfying_version(&conflict.package, &conflict.requiring_packages)?
+                }
+                ConflictResolutionStrategy::UseMaximumSatisfying => {
+                    // Get maximum version that satisfies most constraints
+                    self.find_maximum_satisfying_version(&conflict.package, &conflict.requiring_packages)?
+                }
+                ConflictResolutionStrategy::ForceVersion(version) => {
+                    // Use forced version
+                    version
+                }
+                ConflictResolutionStrategy::Skip => {
+                    // Skip resolution
+                    continue;
+                }
+            };
+            
+            resolutions.insert(conflict.package.clone(), resolved_version);
+        }
+        
+        Ok(resolutions)
+    }
+
+    /// Get resolution strategy for conflict
+    #[allow(dead_code)]
+    async fn get_resolution_strategy(&self, conflict: &VersionConflict) -> ConflictResolutionStrategy {
+        let context = self.context.read().await;
+        context.resolution_strategies
+            .get(&conflict.package)
+            .cloned()
+            .unwrap_or(ConflictResolutionStrategy::UseMaximumSatisfying)
+    }
+
+    /// Find latest version satisfying all constraints
+    #[allow(dead_code)]
+    fn find_latest_satisfying_version(
+        &self,
+        package: &str,
+        constraints: &HashMap<String, VersionReq>,
+    ) -> BlastResult<Version> {
+        let versions = self.get_available_versions(package)?;
+        
+        versions.into_iter()
+            .rev() // Latest first
+            .find(|version| {
+                constraints.values().all(|req| {
+                    req.matches(&SemVersion::parse(&version.version).unwrap())
+                })
+            })
+            .ok_or_else(|| {
+                crate::error::BlastError::resolution(
+                    format!("No version of {} satisfies all constraints", package)
+                )
+            })
+    }
+
+    /// Find minimum version satisfying all constraints
+    #[allow(dead_code)]
+    fn find_minimum_satisfying_version(
+        &self,
+        package: &str,
+        constraints: &HashMap<String, VersionReq>,
+    ) -> BlastResult<Version> {
+        let versions = self.get_available_versions(package)?;
+        
+        versions.into_iter()
+            .find(|version| {
+                constraints.values().all(|req| {
+                    req.matches(&SemVersion::parse(&version.version).unwrap())
+                })
+            })
+            .ok_or_else(|| {
+                crate::error::BlastError::resolution(
+                    format!("No version of {} satisfies all constraints", package)
+                )
+            })
+    }
+
+    /// Find version satisfying most constraints
+    #[allow(dead_code)]
+    fn find_maximum_satisfying_version(
+        &self,
+        package: &str,
+        constraints: &HashMap<String, VersionReq>,
+    ) -> BlastResult<Version> {
+        let versions = self.get_available_versions(package)?;
+        
+        let mut max_satisfaction = 0;
+        let mut best_version = None;
+        
+        for version in versions {
+            let satisfaction_count = constraints.values()
+                .filter(|req| {
+                    req.matches(&SemVersion::parse(&version.version).unwrap())
+                })
+                .count();
+            
+            if satisfaction_count > max_satisfaction {
+                max_satisfaction = satisfaction_count;
+                best_version = Some(version);
+            }
+        }
+        
+        best_version.ok_or_else(|| {
+            crate::error::BlastError::resolution(
+                format!("No suitable version found for {}", package)
+            )
+        })
+    }
+
+    /// Get available versions for package
+    #[allow(dead_code)]
+    fn get_available_versions(&self, package: &str) -> BlastResult<Vec<Version>> {
+        self.cache.get(package)
+            .cloned()
+            .ok_or_else(|| {
+                crate::error::BlastError::resolution(
+                    format!("No versions found for package {}", package)
+                )
+            })
     }
 
     /// Get current package state
@@ -109,17 +289,18 @@ impl DependencyResolver {
         let mut checked = HashSet::new();
         
         // Check each package
-        for (name, metadata) in &state.installed {
-            if checked.contains(name) {
+        for pkg in state.get_all_packages() {
+            let name = &pkg.version.version;
+            if checked.contains(name as &str) {
                 continue;
             }
             
             // Get package dependencies
-            let deps = &metadata.version.dependencies;
+            let deps = &pkg.version.dependencies;
             
             // Check each dependency
             for dep in deps {
-                if let Some(installed) = state.installed.get(&dep.name) {
+                if let Some(installed) = state.get_package(&dep.name) {
                     // Parse version constraint
                     let version_req = VersionReq::parse(&dep.version_constraint)
                         .map_err(|e| crate::error::BlastError::resolution(e.to_string()))?;

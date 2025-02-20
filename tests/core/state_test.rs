@@ -3,8 +3,9 @@ use std::str::FromStr;
 use blast_core::version::{Version, VersionConstraint};
 use blast_core::package::Package;
 use blast_core::metadata::PackageMetadata;
-use blast_core::state::EnvironmentState;
+use blast_core::state::{EnvironmentState, PackageState, PackageInfo};
 use blast_core::python::PythonVersion;
+use chrono::Utc;
 
 fn create_package_metadata(
     name: String,
@@ -35,7 +36,7 @@ fn test_state_creation() {
 
     assert_eq!(state.name, "test-env");
     assert_eq!(state.python_version, python_version);
-    assert!(state.packages.is_empty());
+    assert!(state.package_state.get_all_packages().is_empty());
     assert!(state.env_vars.is_empty());
 }
 
@@ -43,9 +44,15 @@ fn test_state_creation() {
 fn test_state_diff() {
     let python_version = PythonVersion::from_str("3.8").unwrap();
     let mut packages1 = HashMap::new();
+    let version = Version {
+        version: "1.0.0".to_string(),
+        released: Utc::now(),
+        python_requires: None,
+        dependencies: Vec::new(),
+    };
     packages1.insert(
         "package-a".to_string(),
-        Version::parse("1.0.0").unwrap(),
+        version,
     );
 
     let mut packages2 = HashMap::new();
@@ -135,9 +142,9 @@ fn test_checkpoint_operations() {
     ).unwrap();
 
     state.add_package(&package);
-    assert_eq!(state.packages.len(), 1);
+    assert_eq!(state.package_state.get_all_packages().len(), 1);
 
     // Restore from checkpoint
     state.restore_from_checkpoint(checkpoint).unwrap();
-    assert!(state.packages.is_empty());
+    assert!(state.package_state.get_all_packages().is_empty());
 } 

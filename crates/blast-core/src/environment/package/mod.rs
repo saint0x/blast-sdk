@@ -7,18 +7,23 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher, Event};
 use std::collections::HashSet;
 use std::time::{SystemTime, Duration};
 use crate::version::VersionConstraint;
+use chrono::{Utc, TimeZone};
 
 mod resolver;
 mod installer;
 mod interceptor;
 mod state;
 mod graph;
+mod progress;
+mod scheduler;
 
 pub use resolver::DependencyResolver;
 pub use installer::PackageInstaller;
 pub use interceptor::PipInterceptor;
 pub use state::{PackageState, PackageInfo};
 pub use graph::{DependencyGraph, DependencyNode};
+pub use progress::{ProgressTracker, InstallationProgress, InstallationStep};
+pub use scheduler::{OperationScheduler, SchedulerConfig, OperationPriority, OperationType, OperationStatus, QueueStatistics};
 
 /// Package version information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +204,8 @@ pub struct PackageLayer {
     watcher: Arc<RwLock<Option<RecommendedWatcher>>>,
     /// Last state save
     last_save: Arc<RwLock<SystemTime>>,
+    /// Operation scheduler
+    scheduler: Arc<OperationScheduler>,
 }
 
 impl PackageLayer {
@@ -208,6 +215,10 @@ impl PackageLayer {
         let resolver = Arc::new(DependencyResolver::new(config.clone()));
         let installer = Arc::new(PackageInstaller::new(config.clone()));
         let interceptor = Arc::new(PipInterceptor::new(config.clone()));
+        
+        // Create scheduler with default config
+        let scheduler_config = SchedulerConfig::default();
+        let scheduler = Arc::new(OperationScheduler::new(scheduler_config));
 
         Ok(Self {
             config,
@@ -218,6 +229,7 @@ impl PackageLayer {
             state_tx: broadcast::channel(16).0,
             watcher: Arc::new(RwLock::new(None)),
             last_save: Arc::new(RwLock::new(SystemTime::now())),
+            scheduler,
         })
     }
 
@@ -227,41 +239,98 @@ impl PackageLayer {
     }
 
     /// Queue package operation
-    pub async fn queue_operation(&self, operation: PackageOperation) -> BlastResult<()> {
-        match operation {
-            PackageOperation::Install { name, version, dependencies } => {
-                // Resolve dependencies
-                let graph = self.resolver.resolve_dependencies(&name, version.as_ref(), &dependencies).await?;
-                
-                // Install packages
-                self.installer.install_packages(&graph).await?;
-                
-                // Update state
-                let mut state = self.state.write().await;
-                state.update_from_graph(&graph).await?;
+    pub async fn queue_operation(&self, operation: PackageOperation) -> BlastResult<String> {
+        // Determine operation priority based on type
+        let priority = match &operation {
+            PackageOperation::Install { .. } => OperationPriority::Normal,
+            PackageOperation::Uninstall { .. } => OperationPriority::High, // Higher priority for uninstalls
+            PackageOperation::Update { .. } => OperationPriority::Normal,
+        };
+
+        // Queue operation with scheduler
+        let operation_id = self.scheduler.queue_operation(
+            operation.clone(),
+            Some(priority),
+            Vec::new(), // No dependencies for now
+        ).await?;
+
+        // Subscribe to operation status updates
+        let mut status_rx = self.scheduler.subscribe_status_updates();
+        let state = Arc::clone(&self.state);
+        let installer = Arc::clone(&self.installer);
+        let operation_clone = operation.clone();
+        let operation_id_clone = operation_id.clone();
+
+        // Spawn task to handle operation execution
+        tokio::spawn(async move {
+            while let Ok((id, status)) = status_rx.recv().await {
+                if id != operation_id_clone {
+                    continue;
+                }
+
+                match status {
+                    OperationStatus::Running { .. } => {
+                        // Execute operation
+                        match &operation_clone {
+                            PackageOperation::Install { name, version, dependencies: _ } => {
+                                let version_str = version.as_ref().map(|v| v.version.as_str()).unwrap_or("");
+                                if let Err(e) = installer.install_package(name.as_str(), version_str).await {
+                                    tracing::error!("Failed to install package {}: {}", name, e);
+                                }
+                            }
+                            PackageOperation::Uninstall { name } => {
+                                if let Err(e) = installer.uninstall_package(name.as_str()).await {
+                                    tracing::error!("Failed to uninstall package {}: {}", name, e);
+                                }
+                            }
+                            PackageOperation::Update { name, from_version: _, to_version } => {
+                                if let Err(e) = installer.update_package(name.as_str(), &to_version.version).await {
+                                    tracing::error!("Failed to update package {}: {}", name, e);
+                                }
+                            }
+                        }
+
+                        // Update state after successful operation
+                        let mut state = state.write().await;
+                        if let Err(e) = state.update_from_operation(&operation_clone).await {
+                            tracing::error!("Failed to update state: {}", e);
+                        }
+                        break;
+                    }
+                    OperationStatus::Completed { .. } => {
+                        // Update state after successful operation
+                        let mut state = state.write().await;
+                        if let Err(e) = state.update_from_operation(&operation_clone).await {
+                            tracing::error!("Failed to update state: {}", e);
+                        }
+                        break;
+                    }
+                    OperationStatus::Failed { .. } | OperationStatus::TimedOut { .. } => {
+                        // Log failure and break
+                        tracing::error!("Operation {} failed or timed out", id);
+                        break;
+                    }
+                    _ => {}
+                }
             }
-            PackageOperation::Uninstall { name } => {
-                // Remove package
-                self.installer.uninstall_package(&name).await?;
-                
-                // Update state
-                let mut state = self.state.write().await;
-                state.remove_package(&name).await?;
-            }
-            PackageOperation::Update { name, from_version, to_version } => {
-                // Resolve new dependencies
-                let graph = self.resolver.resolve_version_update(&name, &from_version, &to_version).await?;
-                
-                // Update packages
-                self.installer.update_packages(&graph).await?;
-                
-                // Update state
-                let mut state = self.state.write().await;
-                state.update_from_graph(&graph).await?;
-            }
-        }
-        
-        Ok(())
+        });
+
+        Ok(operation_id)
+    }
+
+    /// Get operation status
+    pub async fn get_operation_status(&self, operation_id: &str) -> Option<OperationStatus> {
+        self.scheduler.get_operation_status(operation_id).await
+    }
+
+    /// Get queue statistics
+    pub async fn get_queue_stats(&self) -> QueueStatistics {
+        self.scheduler.get_queue_stats().await
+    }
+
+    /// Cancel operation
+    pub async fn cancel_operation(&self, operation_id: &str) -> BlastResult<()> {
+        self.scheduler.cancel_operation(operation_id).await
     }
 
     /// Intercept pip operation
@@ -353,8 +422,14 @@ impl PackageLayer {
                 // Check if state has changed since last save
                 let state_guard = state.read().await;
                 let last_save_time = *last_save.read().await;
+                let last_save_datetime = Utc.timestamp_opt(
+                    last_save_time.duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64,
+                    0
+                ).unwrap();
                 
-                if state_guard.last_modified() > last_save_time {
+                if state_guard.last_modified() > last_save_datetime {
                     let state_path = config.env_path.join("package_state.json");
                     if let Err(e) = state_guard.save(&state_path).await {
                         tracing::error!("Failed to save package state: {}", e);
