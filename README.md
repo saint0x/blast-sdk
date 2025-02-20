@@ -1,53 +1,70 @@
-# Blast: Modern Python Environment Manager
+# Blast - Intelligent Python Environment Manager
 
-Blast is a high-performance Python environment manager written in Rust that reimagines the traditional venv workflow. It implements a two-layer synchronization architecture where the environment state layer manages containerization and isolation, while the package management layer handles real-time dependency synchronization.
+Blast is a powerful Python environment manager that provides seamless environment activation and robust dependency management, powered by a persistent daemon for enhanced performance.
 
-## Features
+## Quick Start
 
-### Core Features
-- **Two-Layer Architecture**
-  - Environment State Layer: Manages containerization and isolation
-  - Package Management Layer: Handles real-time package management
-- **Real-time Dependency Management**
-  - Live pip operation interception
-  - Automatic dependency resolution
-  - Version conflict detection and resolution
-- **State Management**
-  - Transaction-based state updates
-  - State history tracking
-  - Rollback capabilities
-- **Security**
-  - Network isolation
-  - Resource limits
-  - Filesystem security
-  - Process isolation
+1. Add blast to your shell configuration:
 
-### Package Layer
-- Real-time pip operation interception
-- Live dependency graph updates
-- Enhanced version conflict resolution
-- Robust package state persistence
-- Transaction-based updates
-- State history tracking
+```bash
+# Add to your ~/.bashrc, ~/.zshrc, or equivalent:
+blast() {
+    if [ "$1" = "start" ]; then
+        eval "$(command blast start "${@:2}")"
+    else
+        command blast "$@"
+    fi
+}
+```
 
-### Integration Layer
-- Layer coordination
-- Automatic conflict resolution
-- Transaction management
-- Error recovery system
-- Metrics collection
-- State synchronization
+2. Create and activate a new environment:
 
-### Shell Integration
-- Multi-shell support (bash, zsh, fish)
-- Clean ANSI handling
-- Proper prompt management
-- Environment variable tracking
-- Cross-platform compatibility
+```bash
+blast start my-project
+```
+
+Your prompt will change to `(blast:my-project)`, indicating that you're now working in the blast environment.
+
+3. Manage your environment:
+
+```bash
+blast install requests    # Install packages
+blast update numpy       # Update specific package
+blast remove pandas      # Remove packages
+blast list              # List installed packages
+blast status            # Check environment status
+blast kill              # Terminate environment
+```
+
+## Core Features
+
+### 🔒 Advanced Isolation
+- **Network Control**: Fine-grained network access policies
+- **Resource Limits**: CPU, memory, and I/O constraints
+- **Filesystem Security**: Path-based access control and monitoring
+- **Process Isolation**: Complete process and namespace separation
+
+### 📦 Smart Package Management
+- **Real-time Dependency Resolution**: Live package operation handling
+- **Conflict Prevention**: Proactive dependency conflict detection
+- **State Management**: Transaction-based package operations
+- **Operation Interception**: Intelligent pip command handling
+
+### 🔄 State Synchronization
+- **Atomic Updates**: All changes are transactional
+- **State History**: Complete environment state tracking
+- **Rollback Support**: Revert to any previous state
+- **Error Recovery**: Automatic error detection and recovery
+
+### 🛠 Developer Experience
+- **Multi-shell Support**: Works with `bash`, `zsh`, and `fish`
+- **Clean Integration**: Proper prompt and environment handling
+- **Status Monitoring**: Real-time environment health checks
+- **Extensible Design**: Plugin support for custom workflows
 
 ## Implementation Status
 
-### Completed
+### ✅ Completed
 - Basic package state management
 - Initial pip operation interception
 - Simple dependency graph updates
@@ -56,7 +73,7 @@ Blast is a high-performance Python environment manager written in Rust that reim
 - Shell integration basics
 - Environment isolation foundation
 
-### In Progress
+### 🚧 In Progress
 - Real-time pip operation handling
 - Live dependency graph updates
 - Enhanced conflict resolution
@@ -65,81 +82,43 @@ Blast is a high-performance Python environment manager written in Rust that reim
 - Automatic conflict resolution
 - Error recovery system
 
-### Planned
-- State history tracking
-- Advanced rollback capabilities
-- More sophisticated resolution strategies
-- Enhanced error recovery mechanisms
-- Improved layer coordination
-- Better transaction management
-- PowerShell support
-- Windows compatibility improvements
-
-## Usage
-
-```bash
-# Create and activate a new environment
-blast start [options]
-
-# Deactivate and clean up environment
-blast kill
-
-# View environment status
-blast status
-
-# List installed packages
-blast list
-
-# Install packages
-blast install <package>
-
-# Update packages
-blast update [package]
-
-# Remove packages
-blast remove <package>
-```
-
 ## Architecture
 
-### Core Components
-- **blast-core**: Core functionality and types
-- **blast-cli**: Command-line interface
-- **blast-daemon**: Background service
+```rust
+// Two-Layer Architecture
+pub struct Environment {
+    // Environment State Layer
+    container: Container,         // Isolation control
+    resources: ResourceManager,   // Resource limits
+    security: SecurityManager,    // Security policies
+    
+    // Package Management Layer
+    packages: PackageManager,     // Package operations
+    resolver: DependencyResolver, // Dependency handling
+    state: StateManager,         // State tracking
+}
+```
 
-### Key Features
-1. **Environment Management**
-   - Robust activation/deactivation
-   - State persistence
-   - Clean ANSI handling
+## Development
 
-2. **Package Management**
-   - Real-time operation handling
-   - Dependency resolution
-   - Conflict management
+To build from source:
 
-3. **Security**
-   - Network isolation
-   - Resource limits
-   - Filesystem security
+```bash
+# Clone repository
+git clone https://github.com/blast-rs/blast
+cd blast
 
-## Development Status
+# Build release version
+cargo build --release
 
-Blast is currently in active development. The core functionality is implemented and working, with ongoing work on advanced features and improvements.
-
-### Current Focus
-1. Real-time pip operation handling
-2. Live dependency graph updates
-3. Enhanced conflict resolution
-4. Transaction-based state management
-5. Layer coordination improvements
-6. Automatic conflict resolution
-7. Error recovery capabilities
+# Run tests
+cargo test --all
+```
 
 ## Contributing
 
-Contributions are welcome! Please read our contributing guidelines and code of conduct before submitting pull requests.
+Contributions are welcome! Please read our [contributing guidelines](CONTRIBUTING.md) before submitting pull requests.
 
 ## License
 
-MIT License - see LICENSE for details 
+MIT License - see [LICENSE](LICENSE) for details. 
