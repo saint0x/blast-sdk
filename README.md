@@ -1,101 +1,79 @@
 # Blast - Intelligent Python Environment Manager
 
-Blast is a powerful Python environment manager that provides seamless environment activation and robust dependency management, powered by a persistent daemon for enhanced performance.
+Blast is a powerful Python environment manager that seamlessly orchestrates dependencies and state, inside an isolated sanboxed enviroment.
 
 ## Quick Start
 
-1. Add blast to your shell configuration:
+1. Install blast:
 
 ```bash
-# Add to your ~/.bashrc, ~/.zshrc, or equivalent:
-blast() {
-    if [ "$1" = "start" ]; then
-        eval "$(command blast start "${@:2}")"
-    else
-        command blast "$@"
-    fi
-}
+cargo install --path .
 ```
 
-2. Create and activate a new environment:
+2. The shell integration will be automatically installed in your shell's rc file (`.zshrc`, `.bashrc`, etc.)
+
+3. Create and activate a new environment:
 
 ```bash
-blast start my-project
+blast start
 ```
 
-Your prompt will change to `(blast:my-project)`, indicating that you're now working in the blast environment.
-
-3. Manage your environment:
-
-```bash
-blast install requests    # Install packages
-blast update numpy       # Update specific package
-blast remove pandas      # Remove packages
-blast list              # List installed packages
-blast status            # Check environment status
-blast kill              # Terminate environment
-```
+Your prompt will change to `(blast)`, indicating that you're now working in the blast environment.
 
 ## Core Features
 
-### 🔒 Advanced Isolation
-- **Network Control**: Fine-grained network access policies
-- **Resource Limits**: CPU, memory, and I/O constraints
-- **Filesystem Security**: Path-based access control and monitoring
-- **Process Isolation**: Complete process and namespace separation
+### 🔒 Environment Isolation
+- **Process Management**: Managed Python process isolation
+- **Resource Monitoring**: CPU and memory usage tracking
+- **Health Checks**: Continuous environment health monitoring
+- **State Persistence**: Reliable environment state management
 
-### 📦 Smart Package Management
-- **Real-time Dependency Resolution**: Live package operation handling
-- **Conflict Prevention**: Proactive dependency conflict detection
-- **State Management**: Transaction-based package operations
-- **Operation Interception**: Intelligent pip command handling
+### 📦 Package Management
+- **Dependency Tracking**: Package state monitoring
+- **Environment Validation**: Integrity checks for Python environments
+- **State Management**: Environment state persistence
+- **Shell Integration**: Seamless shell activation and deactivation
 
-### 🔄 State Synchronization
-- **Atomic Updates**: All changes are transactional
-- **State History**: Complete environment state tracking
-- **Rollback Support**: Revert to any previous state
-- **Error Recovery**: Automatic error detection and recovery
+### 🔄 Daemon Architecture
+- **Background Service**: Persistent daemon for environment management
+- **Health Monitoring**: Real-time health status checks
+- **Resource Limits**: Basic resource usage monitoring
+- **State Synchronization**: Environment state coordination
 
 ### 🛠 Developer Experience
-- **Multi-shell Support**: Works with `bash`, `zsh`, and `fish`
+- **Multi-shell Support**: Works with `bash`, `zsh`, `fish`, and `powershell`
 - **Clean Integration**: Proper prompt and environment handling
-- **Status Monitoring**: Real-time environment health checks
-- **Extensible Design**: Plugin support for custom workflows
+- **Status Monitoring**: Environment health checks
+- **Automatic Setup**: Self-installing shell integration
 
 ## Implementation Status
 
 ### ✅ Completed
-- Basic package state management
-- Initial pip operation interception
-- Simple dependency graph updates
-- Basic conflict checking
-- State persistence (save/load)
-- Shell integration basics
-- Environment isolation foundation
+- Daemon-based environment management
+- Shell integration and activation
+- Environment state persistence
+- Health monitoring system
+- Resource usage tracking
+- Multi-shell support
+- Process isolation basics
 
 ### 🚧 In Progress
-- Real-time pip operation handling
-- Live dependency graph updates
-- Enhanced conflict resolution
-- Transaction-based state management
-- Layer coordination improvements
-- Automatic conflict resolution
-- Error recovery system
+- Package management integration
+- Enhanced resource limits
+- Advanced isolation features
+- Custom environment configurations
+- Network isolation
+- Container runtime support
 
 ## Architecture
 
 ```rust
-// Two-Layer Architecture
-pub struct Environment {
-    // Environment State Layer
-    container: Container,         // Isolation control
-    resources: ResourceManager,   // Resource limits
-    security: SecurityManager,    // Security policies
-    
-    // Package Management Layer
-    packages: PackageManager,     // Package operations
-    resolver: DependencyResolver, // Dependency handling
-    state: StateManager,         // State tracking
+// Core Architecture
+pub struct Daemon {
+    state_manager: StateManager,     // State persistence
+    health_manager: HealthManager,   // Health monitoring
+    resource_monitor: ResourceMonitor, // Resource tracking
+    metrics_manager: MetricsManager,  // Usage metrics
 }
 ```
 
@@ -105,19 +83,19 @@ To build from source:
 
 ```bash
 # Clone repository
-git clone https://github.com/blast-rs/blast
-cd blast
+git clone https://github.com/saint0x/blast-sdk.git
+cd blast-rs
 
 # Build release version
 cargo build --release
 
-# Run tests
-cargo test --all
+# Install locally
+cargo install --path .
 ```
 
 ## Contributing
 
-Contributions are welcome! Please read our [contributing guidelines](CONTRIBUTING.md) before submitting pull requests.
+Contributions are welcome! Please feel free to submit pull requests.
 
 ## License
 
