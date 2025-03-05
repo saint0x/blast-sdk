@@ -1,10 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use petgraph::{Graph, Directed};
 use petgraph::graph::NodeIndex;
-use petgraph::algo::kosaraju_scc;
 
 use blast_core::{
-    error::BlastResult,
     package::Package,
     version::Version,
 };
@@ -205,13 +203,16 @@ impl DependencyValidator {
             
             for neighbor in self.graph.neighbors(node) {
                 let dep = &self.graph[neighbor];
-                constraints.push(dep.python_version().to_string());
+                let dep_version = dep.version().to_string();
+                constraints.push(dep_version.clone());
                 
-                if !package.python_version().is_compatible_with(dep.python_version()) {
-                    issues.push(ValidationIssue::PythonVersionConflict {
-                        package: package.name().to_string(),
-                        version_constraints: constraints.clone(),
-                    });
+                if let Ok(is_compatible) = package.is_python_compatible(&dep_version) {
+                    if !is_compatible {
+                        issues.push(ValidationIssue::PythonVersionConflict {
+                            package: package.name().to_string(),
+                            version_constraints: constraints.clone(),
+                        });
+                    }
                 }
             }
         }

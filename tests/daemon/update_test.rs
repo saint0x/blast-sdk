@@ -3,12 +3,13 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tempfile::tempdir;
 use blast_core::{
-    package::{Package, PackageId, Version},
-    python::PythonVersion,
+    package::{Package, PackageId},
+    version::Version,
+    environment::resources::{ResourceUsage, DiskUsage},
 };
 use blast_daemon::{
     update::{UpdateManager, UpdateType, UpdateRequest},
-    monitor::{MonitorEvent, EnvironmentUsage, DiskUsage, ResourceUsage},
+    monitor::{MonitorEvent, EnvironmentUsage},
 };
 
 mod update_manager {

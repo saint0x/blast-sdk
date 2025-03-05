@@ -1,15 +1,13 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 use blast_core::{
-    version_control::{
-        VersionManager,
-        VersionPolicy,
-        UpgradeStrategy,
-        VersionChangeAnalysis,
-        VersionChangeType,
-    },
-    package::{Package, PackageMetadata},
-    version::{Version, VersionConstraint, PythonVersion},
+    PythonVersion,
+    metadata::PackageMetadata,
+    Package,
+    version_control::{VersionManager, VersionPolicy, UpgradeStrategy},
+    Version,
+    VersionConstraint,
+    version_history::{VersionChangeAnalysis, VersionImpact},
 };
 
 fn create_package_metadata(
@@ -135,8 +133,8 @@ fn test_change_impact_analysis() {
     manager.add_installation(&package, true, &python_version, "Initial install".to_string());
 
     let analysis = manager.analyze_change_impact(&package, &Version::parse("2.0.0").unwrap()).unwrap();
-    assert_eq!(analysis.change_type, VersionChangeType::Major);
-    assert!(analysis.breaking_changes);
+    assert_eq!(analysis.impact, VersionImpact::Breaking);
+    assert!(!analysis.breaking_changes.is_empty());
 }
 
 #[test]

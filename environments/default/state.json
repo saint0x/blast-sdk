@@ -1,0 +1,12 @@
+{
+  "active_env_name": "default",
+  "active_env_path": "/Users/saint/Desktop/blast-rs/environments/default",
+  "active_python_version": {
+    "major": 3,
+    "minor": 8,
+    "patch": null
+  },
+  "env_vars": {},
+  "package_cache": {},
+  "last_update": "2025-03-05T02:56:20.842569Z"
+}

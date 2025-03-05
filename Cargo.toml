@@ -79,11 +79,17 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+chrono = "0.4"
 
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = { workspace = true }
 mockall = { workspace = true }
+tempfile = { workspace = true }
+glob = "0.3"
+petgraph = "0.6"
+blast-daemon = { path = "crates/blast-daemon" }
 
 [profile.release]
 lto = true

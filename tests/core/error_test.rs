@@ -1,4 +1,5 @@
 use blast_core::error::BlastError;
+use glob;
 
 #[test]
 fn test_error_creation() {

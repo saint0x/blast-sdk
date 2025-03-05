@@ -61,8 +61,10 @@ security-framework = "2.9.2"
 toml = "0.8"
 sha2 = "0.10"
 hex = "0.4"
+termcolor = "1.2"
 
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.0"
 mockall = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }

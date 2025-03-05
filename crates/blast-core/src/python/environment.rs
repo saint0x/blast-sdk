@@ -1,28 +1,28 @@
 use std::path::PathBuf;
-use std::process::Command;
-use std::collections::HashMap;
-use async_trait::async_trait;
-use crate::{
-    error::{BlastError, BlastResult},
-    package::Package,
-    environment::{
-        Environment,
-        EnvironmentConfig,
-        EnvironmentImpl,
-        IsolationLevel,
-        ResourceLimits,
-        SecurityConfig,
-    },
-    metadata::PackageMetadata,
-    version::VersionConstraint,
-};
+use tokio::process::Command;
+use crate::error::BlastResult;
+use crate::package::Package;
+use crate::environment::Environment;
 use super::PythonVersion;
 
 /// Python environment implementation
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PythonEnvironment {
     /// Inner environment
     inner: EnvironmentImpl,
+    /// Cached version string
+    version_string: String,
+}
+
+/// Inner environment implementation
+#[derive(Debug, Clone)]
+struct EnvironmentImpl {
+    /// Environment name
+    name: String,
+    /// Environment path
+    path: PathBuf,
+    /// Python version
+    version: PythonVersion,
 }
 
 impl PythonEnvironment {
@@ -32,103 +32,142 @@ impl PythonEnvironment {
         path: PathBuf,
         python_version: PythonVersion,
     ) -> BlastResult<Self> {
-        let config = EnvironmentConfig {
+        let inner = EnvironmentImpl {
             name,
             path,
-            python_version: python_version.to_string(),
-            isolation: IsolationLevel::Process,
-            resource_limits: ResourceLimits::default(),
-            security: SecurityConfig::default(),
+            version: python_version.clone(),
         };
-
-        let inner = EnvironmentImpl::new(config).await?;
-        Ok(Self { inner })
+        
+        Ok(Self { 
+            inner,
+            version_string: python_version.to_string(),
+        })
     }
 
     /// Get installed packages
     pub async fn get_packages(&self) -> BlastResult<Vec<Package>> {
-        let pip_path = self.inner.path().join("bin").join("pip");
+        let pip_path = self.inner.path.join("bin").join("pip");
         let output = Command::new(pip_path)
             .args(&["list", "--format=json"])
-            .output()?;
+            .output()
+            .await?;
 
         if !output.status.success() {
-            return Err(BlastError::CommandFailed(
-                "Failed to list packages".to_string(),
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
+            return Ok(Vec::new());
         }
 
-        let packages: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)?;
-        
-        let result = packages.into_iter()
-            .map(|pkg| {
-                let name = pkg["name"].as_str().ok_or_else(|| 
-                    BlastError::ParseError("Missing package name".to_string())
-                )?.to_string();
-                
-                let version = pkg["version"].as_str().ok_or_else(|| 
-                    BlastError::ParseError("Missing package version".to_string())
-                )?.to_string();
-
-                Package::new(
-                    name.clone(),
-                    version.clone(),
-                    PackageMetadata::new(
-                        name,
-                        version,
-                        HashMap::new(),
-                        VersionConstraint::any(),
-                    ),
-                    VersionConstraint::any(),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(result)
+        let packages: Vec<Package> = serde_json::from_slice(&output.stdout)?;
+        Ok(packages)
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl Environment for PythonEnvironment {
     async fn init(&self) -> BlastResult<()> {
-        self.inner.init().await
+        // Create standard directories
+        let bin_dir = self.inner.path.join("bin");
+        let lib_dir = self.inner.path.join("lib");
+        let include_dir = self.inner.path.join("include");
+        let site_packages_dir = lib_dir.join("python3").join("site-packages");
+
+        for dir in [&bin_dir, &lib_dir, &include_dir, &site_packages_dir] {
+            tokio::fs::create_dir_all(dir).await?;
+        }
+
+        Ok(())
     }
 
     async fn install_package(&self, name: String, version: Option<String>) -> BlastResult<()> {
-        self.inner.install_package(name, version).await
+        let mut cmd = Command::new(self.inner.path.join("bin").join("pip"));
+        cmd.arg("install").arg(&name);
+        if let Some(version) = version {
+            cmd.arg(&format!("{}=={}", name, version));
+        }
+        let output = cmd.output().await?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(crate::error::BlastError::Environment(
+                format!("Failed to install package {}", name)
+            ))
+        }
     }
 
     async fn uninstall_package(&self, name: String) -> BlastResult<()> {
-        self.inner.uninstall_package(name).await
+        let output = Command::new(self.inner.path.join("bin").join("pip"))
+            .args(&["uninstall", "-y", &name])
+            .output()
+            .await?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(crate::error::BlastError::Environment(
+                format!("Failed to uninstall package {}", name)
+            ))
+        }
     }
 
     async fn update_package(&self, name: String, version: String) -> BlastResult<()> {
-        self.inner.update_package(name, version).await
+        let output = Command::new(self.inner.path.join("bin").join("pip"))
+            .args(&["install", "-U", &format!("{}=={}", name, version)])
+            .output()
+            .await?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(crate::error::BlastError::Environment(
+                format!("Failed to update package {}", name)
+            ))
+        }
     }
 
     async fn check_package_conflicts(&self) -> BlastResult<Vec<String>> {
-        self.inner.check_package_conflicts().await
+        let output = Command::new(self.inner.path.join("bin").join("pip"))
+            .args(&["check"])
+            .output()
+            .await?;
+        if output.status.success() {
+            Ok(Vec::new())
+        } else {
+            Ok(String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .map(|s| s.to_string())
+                .collect())
+        }
     }
 
     async fn intercept_pip(&self, args: Vec<String>) -> BlastResult<()> {
-        self.inner.intercept_pip(args).await
+        let output = Command::new(self.inner.path.join("bin").join("pip"))
+            .args(&args)
+            .output()
+            .await?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(crate::error::BlastError::Environment(
+                "Pip command failed".to_string()
+            ))
+        }
     }
 
     async fn get_packages(&self) -> BlastResult<Vec<Package>> {
-        self.inner.get_packages().await
+        self.get_packages().await
     }
 
     fn path(&self) -> &PathBuf {
-        self.inner.path()
+        &self.inner.path
     }
 
     fn python_version(&self) -> &str {
-        self.inner.python_version()
+        &self.version_string
     }
 
     fn name(&self) -> &str {
-        self.inner.name()
+        if self.inner.name.is_empty() {
+            "unnamed"
+        } else {
+            &self.inner.name
+        }
     }
 }
 

@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use blast_core::{
     python::{PythonEnvironment, PythonVersion},
     sync::{
-        SyncManager, SyncStatus, ConflictType, ConflictResolution,
-        MergeStrategy, OperationStatus, ValidationResult,
+        SyncManager, SyncStatus, MergeStrategy,
+        validation::SyncValidation,
     },
-    package::{Package, PackageMetadata},
-    version::{Version, VersionConstraint},
+    package::Package,
+    metadata::PackageMetadata,
+    version::VersionConstraint,
     error::BlastResult,
 };
 

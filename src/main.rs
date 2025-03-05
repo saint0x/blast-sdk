@@ -3,13 +3,76 @@ use blast_cli;
 use tracing::{info, error, debug, Level, warn};
 use tracing_subscriber::{FmtSubscriber, EnvFilter};
 use tracing_subscriber::fmt::format::FmtSpan;
-use tokio::sync::watch;
-use std::sync::Arc;
-use std::sync::RwLock;
+use tokio::sync::{watch, mpsc};
 use std::sync::Once;
-use blast_daemon::{Daemon, DaemonConfig, state::StateManagement, StateManager};
+use blast_daemon::{
+    Daemon, DaemonConfig, state::StateManagement,
+    monitor::{PythonResourceMonitor, PythonResourceLimits},
+    metrics::MetricsManager,
+    error::DaemonResult,
+};
+use blast_core::python::PythonVersion;
+use chrono;
+use std::time::Duration;
+use tokio::time::sleep;
+use std::sync::Arc;
 
 static LOGGING_INIT: Once = Once::new();
+
+const MAX_STARTUP_ATTEMPTS: u32 = 3;
+const STARTUP_RETRY_DELAY: Duration = Duration::from_secs(2);
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Health check status
+#[derive(Debug)]
+struct HealthStatus {
+    daemon_healthy: bool,
+    state_healthy: bool,
+    monitor_healthy: bool,
+}
+
+/// Health check manager
+struct HealthManager {
+    daemon: Arc<Daemon>,
+    monitor: PythonResourceMonitor,
+    metrics: MetricsManager,
+}
+
+impl HealthManager {
+    fn new(daemon: Daemon, monitor: PythonResourceMonitor, metrics: MetricsManager) -> Self {
+        Self {
+            daemon: Arc::new(daemon),
+            monitor,
+            metrics,
+        }
+    }
+
+    async fn check_health(&mut self) -> DaemonResult<HealthStatus> {
+        let mut status = HealthStatus {
+            daemon_healthy: false,
+            state_healthy: false,
+            monitor_healthy: false,
+        };
+
+        // Check daemon access
+        if self.daemon.verify_access().await.is_ok() {
+            status.daemon_healthy = true;
+        }
+
+        // Check state manager
+        let state_manager = self.daemon.state_manager();
+        if state_manager.read().await.verify().await.is_ok() {
+            status.state_healthy = true;
+        }
+
+        // Check monitor - this is not async
+        if self.monitor.check_limits() {
+            status.monitor_healthy = true;
+        }
+
+        Ok(status)
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,134 +89,200 @@ async fn main() -> Result<()> {
         info!("Initializing blast environment...");
         // We're in eval mode, just run the command and output the results
         blast_cli::run().await
+    } else if let Some("daemon") = std::env::args().nth(1).as_deref() {
+        run_daemon().await
+    } else if let Some("start") = std::env::args().nth(1).as_deref() {
+        start_environment().await
     } else {
-        info!("Starting blast environment setup...");
+        debug!("Running regular command");
+        blast_cli::run().await
+    }
+}
 
-        if let Some("start") = std::env::args().nth(1).as_deref() {
-            // Get project root
-            let project_root = std::env::current_dir()?;
-            info!("Creating new environment at {}", project_root.display());
-            debug!("Setting up directory structure");
-            
-            // Verify directory structure
-            for dir in &[
-                ".blast",
-                "environments",
-                "cache",
-                ".blast/state",
-                ".blast/logs",
-            ] {
-                let path = project_root.join(dir);
-                if !path.exists() {
-                    std::fs::create_dir_all(&path)?;
+async fn run_daemon() -> Result<()> {
+    info!("Starting blast daemon...");
+    
+    // Get project root
+    let project_root = std::env::current_dir()?;
+    
+    // Initialize daemon with configuration
+    let daemon = Daemon::new(DaemonConfig {
+        max_pending_updates: 100,
+        max_snapshot_age_days: 7,
+        env_path: project_root.join("environments/default"),
+        cache_path: project_root.join("cache"),
+    }).await?;
+
+    // Create channels for component communication
+    let (monitor_tx, mut monitor_rx) = mpsc::channel(100);
+    let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+    // Initialize components
+    let metrics_manager = MetricsManager::new();
+    let resource_monitor = PythonResourceMonitor::new(
+        project_root.join("environments/default"),
+        project_root.join("cache"),
+        PythonResourceLimits::default(),
+    );
+
+    // Create health manager
+    let mut health_manager = HealthManager::new(
+        daemon,
+        resource_monitor,
+        metrics_manager,
+    );
+
+    // Start background services
+    health_manager.daemon.start_background().await?;
+
+    // Main daemon loop with integrated health checks
+    let mut health_check_interval = tokio::time::interval(HEALTH_CHECK_INTERVAL);
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                info!("Received shutdown signal");
+                break;
+            }
+            Some(event) = monitor_rx.recv() => {
+                if let Err(e) = handle_monitor_event(event).await {
+                    error!("Failed to handle monitor event: {}", e);
                 }
-                debug!("Created directory: {}", dir);
             }
-
-            debug!("Checking state file");
-            let state_file = project_root.join(".blast/state.json");
-            if !state_file.exists() {
-                std::fs::write(&state_file, "{}")?;
-            }
-
-            info!("Directory structure ready");
-            debug!("Initializing daemon");
-
-            // Initialize daemon
-            let daemon = Daemon::new(DaemonConfig {
-                max_pending_updates: 100,
-                max_snapshot_age_days: 7,
-                env_path: project_root.join("environments/default"),
-                cache_path: project_root.join("cache"),
-            }).await?;
-
-            info!("Daemon initialized successfully");
-            debug!("Setting up state management");
-
-            // Initialize state manager
-            let state_manager = Arc::new(RwLock::new(StateManager::new(
-                project_root.clone(),
-            )));
-
-            {
-                let state = state_manager.write().map_err(|e| anyhow::anyhow!("Failed to acquire state lock: {}", e))?;
-                let state_manager: &dyn StateManagement = &*state;
-                debug!("Saving initial state");
-                StateManagement::save(state_manager).await?;
-                debug!("Loading state");
-                StateManagement::load(state_manager).await?;
-            }
-
-            info!("State management ready");
-            debug!("Verifying daemon access");
-
-            // Verify daemon access
-            if let Err(e) = daemon.verify_access().await {
-                error!("Access verification failed: {}", e);
-                std::process::exit(1);
-            }
-
-            info!("Daemon access verified");
-            debug!("Preparing activation script");
-
-            // Get environment path and name for logging
-            let env_path = project_root.join("environments/default");
-            debug!("Environment path: {}", env_path.display());
-
-            // Start daemon in background
-            info!("Starting background services");
-            daemon.start_background().await?;
-            
-            debug!("Setting up cleanup handlers");
-            let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-            // Start the daemon in a truly detached way
-            tokio::spawn(async move {
-                debug!("Background services started");
-                let mut rx = shutdown_rx;
-                
-                loop {
-                    tokio::select! {
-                        Ok(()) = rx.changed() => {
-                            if *rx.borrow() {
-                                debug!("Received shutdown signal");
-                                break;
-                            }
+            _ = health_check_interval.tick() => {
+                match health_manager.check_health().await {
+                    Ok(status) => {
+                        if !status.daemon_healthy {
+                            error!("Daemon health check failed");
                         }
-                        _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
-                            if let Err(e) = daemon.verify_access().await {
-                                if !e.to_string().contains("Transaction not found") {
-                                    error!("Daemon verification error: {}", e);
-                                    break;
-                                }
-                            }
+                        if !status.state_healthy {
+                            error!("State manager health check failed");
+                        }
+                        if !status.monitor_healthy {
+                            error!("Resource monitor health check failed");
                         }
                     }
+                    Err(e) => {
+                        error!("Health check failed: {}", e);
+                    }
                 }
-                debug!("Background services stopped");
-            });
-
-            info!("Environment activated successfully");
-            info!("Blast is ready - use 'blast deactivate' to exit");
-
-            // Output shell activation script
-            println!(r#"
-export BLAST_ENV="{}"
-export BLAST_ENV_NAME="default"
-export PATH="{}/bin:$PATH"
-export PS1="(blast) $PS1"
-"#, 
-                project_root.display(),
-                env_path.display()
-            );
-
-            // Exit immediately after outputting the activation script
-            std::process::exit(0);
-        } else {
-            debug!("Running regular command");
-            blast_cli::run().await
+            }
         }
     }
+
+    info!("Daemon shutting down");
+    Ok(())
+}
+
+async fn start_environment() -> Result<()> {
+    info!("Starting blast environment setup...");
+    
+    // Get project root
+    let project_root = std::env::current_dir()?;
+    
+    // Create directory structure
+    for dir in &[
+        ".blast",
+        "environments",
+        "environments/default",
+        "environments/default/bin",
+        "environments/default/lib",
+        "environments/default/lib/python3",
+        "environments/default/lib/python3/site-packages",
+        "cache",
+        ".blast/state",
+        ".blast/logs",
+        ".blast/metrics",
+    ] {
+        let path = project_root.join(dir);
+        if !path.exists() {
+            std::fs::create_dir_all(&path)?;
+        }
+    }
+
+    // Initialize daemon with retries
+    let mut daemon = None;
+    for attempt in 1..=MAX_STARTUP_ATTEMPTS {
+        match Daemon::new(DaemonConfig {
+            max_pending_updates: 100,
+            max_snapshot_age_days: 7,
+            env_path: project_root.join("environments/default"),
+            cache_path: project_root.join("cache"),
+        }).await {
+            Ok(d) => {
+                daemon = Some(d);
+                break;
+            }
+            Err(e) => {
+                error!("Attempt {} to initialize daemon failed: {}", attempt, e);
+                if attempt < MAX_STARTUP_ATTEMPTS {
+                    sleep(STARTUP_RETRY_DELAY).await;
+                } else {
+                    return Err(anyhow::anyhow!("Failed to initialize daemon after {} attempts", MAX_STARTUP_ATTEMPTS));
+                }
+            }
+        }
+    }
+
+    let daemon = daemon.unwrap();
+
+    // Initialize state manager
+    let state_manager = daemon.state_manager();
+    let state_manager = state_manager.read().await;
+
+    // Initialize and verify state
+    let mut state = state_manager.get_current_state().await?;
+    state.active_env_name = Some("default".to_string());
+    state.active_env_path = Some(project_root.join("environments/default"));
+    state.active_python_version = Some(PythonVersion::parse("3.8")?);
+    state.last_update = Some(chrono::Utc::now());
+
+    // Update and save state
+    state_manager.update_current_state(state).await?;
+    state_manager.save().await?;
+
+    // Start daemon and verify it's running
+    daemon.start_background().await?;
+    
+    // Verify daemon access with retries
+    for attempt in 1..=MAX_STARTUP_ATTEMPTS {
+        match daemon.verify_access().await {
+            Ok(_) => break,
+            Err(e) => {
+                error!("Attempt {} to verify daemon access failed: {}", attempt, e);
+                if attempt < MAX_STARTUP_ATTEMPTS {
+                    sleep(STARTUP_RETRY_DELAY).await;
+                } else {
+                    return Err(anyhow::anyhow!("Failed to verify daemon access after {} attempts", MAX_STARTUP_ATTEMPTS));
+                }
+            }
+        }
+    }
+
+    // Get environment path
+    let env_path = project_root.join("environments/default");
+    
+    // Create an activator for shell integration
+    let activator = blast_cli::shell::EnvironmentActivator::new(
+        env_path.clone(),
+        "default".to_string(),
+    );
+
+    // Save the shell state
+    activator.save_state()?;
+
+    // Generate the activation script
+    let mut activation_script = activator.generate_activation_script();
+    
+    // Only modify the PS1 prompt to show (blast) instead of (blast:default)
+    activation_script = activation_script.replace(
+        r#"export PS1="(blast:default) $PS1""#,
+        r#"export PS1="(blast) $PS1""#
+    );
+
+    // Output the activation script for shell sourcing
+    print!("{}", activation_script);
+
+    Ok(())
 }
 
 fn init_logging(eval_mode: bool) {
@@ -189,4 +318,25 @@ fn init_logging(eval_mode: bool) {
 
         let _ = builder.try_init();
     });
+}
+
+async fn handle_monitor_event(event: blast_daemon::monitor::MonitorEvent) -> Result<()> {
+    match event {
+        blast_daemon::monitor::MonitorEvent::ResourceCheck => {
+            debug!("Processing resource check event");
+        }
+        blast_daemon::monitor::MonitorEvent::ResourceUpdate(usage) => {
+            debug!("Resource usage update: {:?}", usage);
+        }
+        blast_daemon::monitor::MonitorEvent::PackageChanged => {
+            info!("Package changes detected, syncing state");
+        }
+        blast_daemon::monitor::MonitorEvent::FileChanged(path) => {
+            debug!("File change detected: {:?}", path);
+        }
+        blast_daemon::monitor::MonitorEvent::StopMonitoring { env_path } => {
+            info!("Stopping monitoring for environment: {:?}", env_path);
+        }
+    }
+    Ok(())
 } 

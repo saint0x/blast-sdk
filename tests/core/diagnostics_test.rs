@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use chrono::{TimeZone, Utc};
+use blast_image::chrono::{TimeZone, Utc};
 use blast_core::diagnostics::{
     Diagnostic, DiagnosticLevel, DiagnosticCategory, DiagnosticCollection,
     DiagnosticSuggestion, CodeContext,

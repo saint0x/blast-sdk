@@ -1,5 +1,6 @@
 use std::sync::Arc;
-use blast_cache::{Cache, CacheBuilder};
+use blast_cache::{CacheStorage, CacheBuilder};
+use blast_image::blake3;
 use tempfile::tempdir;
 
 #[tokio::test]

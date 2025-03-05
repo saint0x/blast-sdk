@@ -1,0 +1,5 @@
+#!/bin/sh
+export BLAST_ENV="/Users/saint/Desktop/blast-rs"
+export BLAST_ENV_NAME="default"
+export PATH="/Users/saint/Desktop/blast-rs/environments/default/bin:$PATH"
+export PS1="(blast) $PS1"

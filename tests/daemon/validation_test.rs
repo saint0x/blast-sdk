@@ -1,6 +1,7 @@
 use std::collections::HashMap;
-use blast_core::package::{Package, PackageId, Version, VersionConstraint};
-use blast_daemon::validation::{DependencyValidator, ValidationIssue};
+use blast_core::version::VersionConstraint;
+use blast_core::package::Package;
+use blast_daemon::validation::{DependencyValidator, ValidationIssue, ValidationResult};
 use petgraph::graph::NodeIndex;
 
 #[test]
@@ -9,22 +10,18 @@ fn test_circular_dependency_detection() {
 
     // Create packages
     let package_a = Package::new(
-        PackageId::new(
-            "package-a",
-            Version::parse("1.0.0").unwrap(),
-        ),
+        "package-a".to_string(),
+        "1.0.0".to_string(),
         HashMap::new(),
         VersionConstraint::parse(">=3.7").unwrap(),
-    );
+    ).unwrap();
 
     let package_b = Package::new(
-        PackageId::new(
-            "package-b",
-            Version::parse("1.0.0").unwrap(),
-        ),
+        "package-b".to_string(),
+        "1.0.0".to_string(),
         HashMap::new(),
         VersionConstraint::parse(">=3.7").unwrap(),
-    );
+    ).unwrap();
 
     // Add packages and create circular dependency
     let a_idx = validator.add_package(package_a);
@@ -47,22 +44,18 @@ fn test_version_conflict_detection() {
 
     // Create packages with conflicting versions
     let package_a_v1 = Package::new(
-        PackageId::new(
-            "package-a",
-            Version::parse("1.0.0").unwrap(),
-        ),
+        "package-a".to_string(),
+        "1.0.0".to_string(),
         HashMap::new(),
         VersionConstraint::parse(">=3.7").unwrap(),
-    );
+    ).unwrap();
 
     let package_a_v2 = Package::new(
-        PackageId::new(
-            "package-a",
-            Version::parse("2.0.0").unwrap(),
-        ),
+        "package-a".to_string(),
+        "2.0.0".to_string(),
         HashMap::new(),
         VersionConstraint::parse(">=3.7").unwrap(),
-    );
+    ).unwrap();
 
     // Add packages
     validator.add_package(package_a_v1);
@@ -83,22 +76,18 @@ fn test_python_version_conflict_detection() {
 
     // Create packages with conflicting Python versions
     let package_a = Package::new(
-        PackageId::new(
-            "package-a",
-            Version::parse("1.0.0").unwrap(),
-        ),
+        "package-a".to_string(),
+        "1.0.0".to_string(),
         HashMap::new(),
         VersionConstraint::parse(">=3.7").unwrap(),
-    );
+    ).unwrap();
 
     let package_b = Package::new(
-        PackageId::new(
-            "package-b",
-            Version::parse("1.0.0").unwrap(),
-        ),
+        "package-b".to_string(),
+        "1.0.0".to_string(),
         HashMap::new(),
         VersionConstraint::parse(">=3.9").unwrap(),
-    );
+    ).unwrap();
 
     // Add packages and dependency
     let a_idx = validator.add_package(package_a);
@@ -120,13 +109,11 @@ fn test_missing_dependency_detection() {
 
     // Create packages
     let package_a = Package::new(
-        PackageId::new(
-            "package-a",
-            Version::parse("1.0.0").unwrap(),
-        ),
+        "package-a".to_string(),
+        "1.0.0".to_string(),
         HashMap::new(),
         VersionConstraint::parse(">=3.7").unwrap(),
-    );
+    ).unwrap();
 
     // Add package but reference non-existent dependency
     let a_idx = validator.add_package(package_a);
@@ -149,13 +136,11 @@ fn test_validation_metrics() {
     // Create a chain of dependencies
     let packages: Vec<_> = (0..3).map(|i| {
         Package::new(
-            PackageId::new(
-                format!("package-{}", i),
-                Version::parse("1.0.0").unwrap(),
-            ),
+            format!("package-{}", i),
+            "1.0.0".to_string(),
             HashMap::new(),
             VersionConstraint::parse(">=3.7").unwrap(),
-        )
+        ).unwrap()
     }).collect();
 
     // Add packages and chain dependencies

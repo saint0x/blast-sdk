@@ -4,9 +4,9 @@
 - can also include other custom configs/versions of packages inthis file, which we will use to nuance blast.toml, thus leading to custom cofigs in the image metadata
 - sync logic is robust but we need the 
 
-- rest of cmds beside start/kill need to be implemented
 
-- remove test code from prod code... again
+
+
 
 - make each dir its own types folder, for centralization of types
 
@@ -24,8 +24,5 @@ Critical Gaps
 
 
 
-    Integration Gaps:
-        Weak coordination between layers
-        No automatic conflict resolution
-        Missing transaction rollback
-        Incomplete error recovery
+
+        

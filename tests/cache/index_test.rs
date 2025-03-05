@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use blast_cache::index::IndexedStorage;
 use blast_cache::memory::MemoryStorage;
+use blast_image::blake3;
 
 #[tokio::test]
 async fn test_indexed_storage_basic() {

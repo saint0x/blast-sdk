@@ -12,6 +12,7 @@ pub mod transaction;
 pub mod update;
 pub mod environment;
 pub mod activation;
+pub mod validation;
 
 // Re-export commonly used types
 pub use error::DaemonError;
@@ -21,6 +22,7 @@ pub use service::{DaemonService, Daemon, DaemonConfig};
 pub use monitor::PythonResourceMonitor;
 pub use environment::{EnvManager, DaemonEnvironment, EnvironmentImage};
 pub use activation::ActivationState;
+pub use validation::{DependencyValidator, ValidationIssue, ValidationResult, ValidationMetrics};
 
 // Internal module re-exports
 pub use monitor::{
@@ -29,7 +31,6 @@ pub use monitor::{
     EnvDiskUsage,
     CacheUsage,
 };
-pub use blast_image::validation;
 pub use state::*;
 pub use metrics::{
     PackageMetrics,

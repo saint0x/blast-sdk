@@ -60,14 +60,59 @@ pub enum Shell {
 
 impl Shell {
     pub fn detect() -> Self {
-        let shell_path = env::var("SHELL").unwrap_or_default();
-        match shell_path.split('/').last().unwrap_or("") {
-            "bash" => Shell::Bash,
-            "zsh" => Shell::Zsh,
-            "fish" => Shell::Fish,
-            "pwsh" | "powershell" => Shell::PowerShell,
-            _ => Shell::Unknown,
+        // Try SHELL env var first
+        if let Ok(shell_path) = env::var("SHELL") {
+            let shell_name = shell_path.split('/').last().unwrap_or("");
+            match shell_name {
+                "bash" => return Shell::Bash,
+                "zsh" => return Shell::Zsh,
+                "fish" => return Shell::Fish,
+                "pwsh" | "powershell" => return Shell::PowerShell,
+                _ => {}
+            }
         }
+
+        // Try BASH_VERSION env var
+        if env::var("BASH_VERSION").is_ok() {
+            return Shell::Bash;
+        }
+
+        // Try ZSH_VERSION env var
+        if env::var("ZSH_VERSION").is_ok() {
+            return Shell::Zsh;
+        }
+
+        // On macOS, check common shell paths
+        #[cfg(target_os = "macos")]
+        {
+            if std::path::Path::new("/bin/zsh").exists() {
+                return Shell::Zsh;
+            }
+            if std::path::Path::new("/bin/bash").exists() {
+                return Shell::Bash;
+            }
+        }
+
+        // On Unix systems, try checking parent process name
+        #[cfg(unix)]
+        if let Ok(ppid) = std::fs::read_to_string("/proc/self/ppid") {
+            if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{}/cmdline", ppid.trim())) {
+                let cmd = cmdline.split('\0').next().unwrap_or("");
+                match cmd {
+                    cmd if cmd.contains("bash") => return Shell::Bash,
+                    cmd if cmd.contains("zsh") => return Shell::Zsh,
+                    cmd if cmd.contains("fish") => return Shell::Fish,
+                    cmd if cmd.contains("pwsh") || cmd.contains("powershell") => return Shell::PowerShell,
+                    _ => {}
+                }
+            }
+        }
+
+        // Default to zsh on macOS (since it's the default shell), bash otherwise
+        #[cfg(target_os = "macos")]
+        return Shell::Zsh;
+        #[cfg(not(target_os = "macos"))]
+        return Shell::Bash;
     }
 
     pub fn get_activation_command(&self, env_path: &PathBuf) -> String {

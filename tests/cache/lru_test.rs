@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use blast_cache::lru::LRUCache;
 use blast_cache::memory::MemoryStorage;
+use blast_image::blake3::hash;
 
 #[tokio::test]
 async fn test_lru_cache_basic() {
@@ -12,9 +13,9 @@ async fn test_lru_cache_basic() {
     let data1 = b"data1";
     let data2 = b"data2";
     let data3 = b"data3";
-    let hash1 = blake3::hash(data1);
-    let hash2 = blake3::hash(data2);
-    let hash3 = blake3::hash(data3);
+    let hash1 = hash(data1);
+    let hash2 = hash(data2);
+    let hash3 = hash(data3);
 
     // Store data
     cache.store(&hash1, data1).await.unwrap();
@@ -40,9 +41,9 @@ async fn test_lru_cache_update_access() {
     let data1 = b"data1";
     let data2 = b"data2";
     let data3 = b"data3";
-    let hash1 = blake3::hash(data1);
-    let hash2 = blake3::hash(data2);
-    let hash3 = blake3::hash(data3);
+    let hash1 = hash(data1);
+    let hash2 = hash(data2);
+    let hash3 = hash(data3);
 
     cache.store(&hash1, data1).await.unwrap();
     cache.store(&hash2, data2).await.unwrap();
@@ -64,7 +65,7 @@ async fn test_lru_cache_clear() {
 
     // Add items
     let data = b"test data";
-    let hash = blake3::hash(data);
+    let hash = hash(data);
     cache.store(&hash, data).await.unwrap();
 
     // Clear cache
@@ -82,7 +83,7 @@ async fn test_lru_cache_remove() {
 
     // Add item
     let data = b"test data";
-    let hash = blake3::hash(data);
+    let hash = hash(data);
     cache.store(&hash, data).await.unwrap();
 
     // Remove item

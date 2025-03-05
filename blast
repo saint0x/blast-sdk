@@ -1,23 +1,21 @@
 #!/bin/bash
 
 if [ "$1" = "start" ]; then
-    # Run blast-rs and capture both stdout and stderr
+    # Run blast-rs and capture output
     output=$(blast-rs start "${@:2}" 2>&1)
     status=$?
     
     if [ $status -eq 0 ]; then
-        # Extract the source command (last line) and execute it
-        source_cmd=$(echo "$output" | tail -n 1)
-        # Show the environment creation message (all but last line)
-        echo "$output" | head -n -1
-        # Execute the source command
-        eval "$source_cmd"
+        # Show the environment creation message
+        echo "$output" | sed -n '/deactivate ()/q;p'
+        # Evaluate the activation script
+        eval "$output"
     else
-        # If there was an error, just show the output
+        # If there was an error, show the output
         echo "$output"
         exit $status
     fi
 else
-    # For all other commands, just pass through to the main binary
+    # For all other commands, just pass through to blast-rs
     exec blast-rs "$@"
 fi 

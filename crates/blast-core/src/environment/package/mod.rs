@@ -277,8 +277,8 @@ impl PackageLayer {
                                 if let Err(e) = installer.install_package(name.as_str(), version_str).await {
                                     tracing::error!("Failed to install package {}: {}", name, e);
                                 }
-                            }
-                            PackageOperation::Uninstall { name } => {
+            }
+            PackageOperation::Uninstall { name } => {
                                 if let Err(e) = installer.uninstall_package(name.as_str()).await {
                                     tracing::error!("Failed to uninstall package {}: {}", name, e);
                                 }

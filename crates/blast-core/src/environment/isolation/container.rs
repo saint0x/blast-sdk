@@ -37,6 +37,7 @@ pub trait ContainerRuntime: Send + Sync {
 }
 
 /// Container implementation
+#[derive(Debug)]
 pub struct Container {
     /// Container ID
     id: String,

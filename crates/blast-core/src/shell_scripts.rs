@@ -49,6 +49,7 @@ deactivate () {{
     if [ ! "$1" = "nondestructive" ] ; then
         # Self destruct!
         unset -f deactivate
+        unset -f pip
     fi
 
     # Unset environment variables
@@ -76,6 +77,16 @@ export PS1
 export BLAST_ENV_NAME="{}"
 export BLAST_ENV_PATH="{}"
 export BLAST_SOCKET_PATH="/tmp/blast_{}.sock"
+
+# Define pip function to intercept pip commands
+pip() {{
+    if [ -n "$BLAST_ENV_NAME" ]; then
+        # Route through blast for interception
+        "$(which blast)" pip "$@"
+    else
+        command pip "$@"
+    fi
+}}
 
 # Make sure to unalias deactivate if it exists
 if [ "$(type -t deactivate)" = "alias" ] ; then
@@ -123,6 +134,7 @@ function deactivate  -d "Exit blast virtual environment and return to normal she
 
     if test "$argv[1]" != "nondestructive"
         functions -e deactivate
+        functions -e pip
     end
 end
 
@@ -141,6 +153,16 @@ set -gx _OLD_FISH_PROMPT_OVERRIDE "$BLAST_ENV_PATH"
 function fish_prompt
     echo -n "(blast:{}) "
     _old_fish_prompt
+end
+
+# Define pip function to intercept pip commands
+function pip
+    if test -n "$BLAST_ENV_NAME"
+        # Route through blast for interception
+        command (which blast) pip $argv
+    else
+        command pip $argv
+    end
 end
 
 # Set environment variables
@@ -189,6 +211,7 @@ function global:deactivate ([switch]$NonDestructive) {{
     if (!$NonDestructive) {{
         # Self destruct!
         Remove-Item function:deactivate
+        Remove-Item function:pip
     }}
 }}
 
@@ -205,6 +228,16 @@ $global:_OLD_BLAST_PROMPT = $function:prompt
 $function:prompt = {{
     Write-Host "(blast:{}) " -NoNewline
     & $global:_OLD_BLAST_PROMPT
+}}
+
+# Define pip function to intercept pip commands
+function global:pip {{
+    if ($env:BLAST_ENV_NAME) {{
+        # Route through blast for interception
+        & (Get-Command -ErrorAction SilentlyContinue blast).Path pip $args
+    }} else {{
+        & (Get-Command -ErrorAction SilentlyContinue pip).Path $args
+    }}
 }}
 
 # Set environment variables

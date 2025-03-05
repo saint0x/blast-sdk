@@ -5,6 +5,7 @@ use blast_cache::memory::MemoryStorage;
 use blast_cache::storage::FileStorage;
 use tempfile::tempdir;
 use blast_cache::layered::{LayerType, CacheLayer};
+use blast_image::blake3;
 
 #[tokio::test]
 async fn test_layered_cache_operations() {

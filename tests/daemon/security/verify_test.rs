@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use blast_core::{
-    package::{Package, PackageId, Version},
-    security::{SecurityPolicy, VulnerabilitySeverity, SignatureRequirement},
+    package::{Package, PackageId},
+    version::Version,
+    security::{SecurityPolicy, VulnerabilitySeverity, IsolationLevel, ResourceLimits, PackageSecurityPolicy},
+    python::PythonVersion,
 };
-use blast_daemon::security::verify::{PackageVerifier, VerificationResult};
+use blast_daemon::verify::{PackageVerifier, VerificationResult};
 
 #[tokio::test]
 async fn test_package_verification() {
@@ -87,7 +89,7 @@ async fn test_policy_violations() {
     let mut pkg_policies = HashMap::new();
     pkg_policies.insert(
         "test-package".to_string(),
-        blast_core::security::PackagePolicy {
+        PackageSecurityPolicy {
             allowed_versions: vec!["2.0".to_string()], // Different from package version
             required_signatures: vec!["specific-key-id".to_string()],
             ..Default::default()
@@ -208,8 +210,11 @@ mod policy_verification {
         let package_path = PathBuf::from("test_data/compliant_package.tar.gz");
         
         let policy = SecurityPolicy {
-            signature_requirement: SignatureRequirement::Required,
-            max_vulnerability_severity: Some("MEDIUM".into()),
+            isolation_level: IsolationLevel::Process,
+            python_version: PythonVersion::parse("3.8").unwrap(),
+            resource_limits: ResourceLimits::default(),
+            vulnerability_scan: true,
+            verify_signatures: true,
             allowed_sources: vec!["trusted-repo.com".into()],
         };
         
@@ -223,8 +228,11 @@ mod policy_verification {
         let package_path = PathBuf::from("test_data/non_compliant_package.tar.gz");
         
         let policy = SecurityPolicy {
-            signature_requirement: SignatureRequirement::Required,
-            max_vulnerability_severity: Some("LOW".into()),
+            isolation_level: IsolationLevel::Process,
+            python_version: PythonVersion::parse("3.8").unwrap(),
+            resource_limits: ResourceLimits::default(),
+            vulnerability_scan: true,
+            verify_signatures: true,
             allowed_sources: vec!["trusted-repo.com".into()],
         };
         
@@ -239,8 +247,11 @@ mod policy_verification {
         let package_path = PathBuf::from("test_data/mixed_compliance.tar.gz");
         
         let policy = SecurityPolicy {
-            signature_requirement: SignatureRequirement::Required,
-            max_vulnerability_severity: Some("MEDIUM".into()),
+            isolation_level: IsolationLevel::Process,
+            python_version: PythonVersion::parse("3.8").unwrap(),
+            resource_limits: ResourceLimits::default(),
+            vulnerability_scan: true,
+            verify_signatures: true,
             allowed_sources: vec!["trusted-repo.com".into(), "verified-source.org".into()],
         };
         

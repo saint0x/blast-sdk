@@ -4,6 +4,7 @@ use tokio::sync::RwLock;
 use blast_core::{
     python::PythonEnvironment,
     security::SecurityPolicy,
+    environment::isolation::{SecurityManager, IsolationManager},
 };
 
 use crate::error::DaemonResult;
@@ -23,10 +24,12 @@ pub struct DaemonConfig {
 }
 
 /// Daemon service
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Daemon {
     /// State manager
     state_manager: Arc<RwLock<StateManager>>,
+    /// Security manager
+    security_manager: Option<Arc<RwLock<SecurityManager>>>,
     /// Configuration
     config: DaemonConfig,
 }
@@ -36,8 +39,15 @@ impl Daemon {
     pub async fn new(config: DaemonConfig) -> DaemonResult<Self> {
         let state_manager = Arc::new(RwLock::new(StateManager::new(config.env_path.clone())));
         
+        // Create security manager
+        let security_manager = SecurityManager::new(
+            config.env_path.clone(),
+            IsolationManager::default(),
+        );
+        
         Ok(Self {
             state_manager,
+            security_manager: Some(Arc::new(RwLock::new(security_manager))),
             config,
         })
     }
@@ -45,6 +55,11 @@ impl Daemon {
     /// Get state manager
     pub fn state_manager(&self) -> Arc<RwLock<StateManager>> {
         self.state_manager.clone()
+    }
+    
+    /// Get security manager
+    pub fn security_manager(&self) -> Option<Arc<RwLock<SecurityManager>>> {
+        self.security_manager.clone()
     }
 
     /// Verify daemon access and permissions
@@ -74,12 +89,23 @@ impl Daemon {
             security_policy.python_version.clone(),
         ).await?;
 
+        // Initialize security if available
+        if let Some(security_manager) = &self.security_manager {
+            let mut security_manager = security_manager.write().await;
+            security_manager.register_environment(&env, security_policy).await?;
+        }
+
         Ok(env)
     }
 
     /// Start background service
     pub async fn start_background(&self) -> DaemonResult<()> {
-        // Implementation will be added later
+        // Start security manager if available
+        if let Some(security_manager) = &self.security_manager {
+            let security_manager = security_manager.read().await;
+            security_manager.start_monitoring().await?;
+        }
+        
         Ok(())
     }
 } 

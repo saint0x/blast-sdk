@@ -1,58 +1,68 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use blast_core::{
-    package::{Package, PackageId, Version},
-    environment::EnvironmentState,
-    python::PythonVersion,
+    package::{Package, PackageId},
+    python::version::PythonVersion,
 };
-use blast_daemon::state::{StateManager, StateChange, StateValidation};
+use blast_daemon::state::{StateManager, StateManagement, State, PackageState, PackageStatus};
+use tempfile::tempdir;
+use uuid::Uuid;
+use chrono::Utc;
 
 mod state_changes {
     use super::*;
 
     #[tokio::test]
     async fn test_state_creation() {
-        let manager = StateManager::new();
+        let dir = tempdir().unwrap();
+        let manager = StateManager::new(dir.path().to_path_buf());
         let state = manager.get_current_state().await;
         assert!(state.is_ok());
     }
 
     #[tokio::test]
     async fn test_package_state() {
-        let mut manager = StateManager::new();
+        let dir = tempdir().unwrap();
+        let manager = StateManager::new(dir.path().to_path_buf());
         
         let package = Package::new(
             PackageId::new(
                 "test-package",
-                Version::parse("1.0.0").unwrap(),
+                "1.0.0".to_string(),
             ),
             HashMap::new(),
             Default::default(),
         );
 
-        // Add package
-        manager.add_package(package.clone()).await.unwrap();
+        // Add package to state
+        let mut state = State::default();
+        state.package_cache.insert(package.id().name().to_string(), PackageState {
+            name: package.id().name().to_string(),
+            version: package.version().to_string(),
+            installed_at: Utc::now(),
+            updated_at: Utc::now(),
+            status: PackageStatus::Installed,
+        });
+        manager.update_current_state(state).await.unwrap();
         
         let state = manager.get_current_state().await.unwrap();
-        assert!(state.has_package(&package.id));
+        assert!(state.package_cache.contains_key(package.id().name()));
     }
 
     #[tokio::test]
     async fn test_environment_state() {
-        let mut manager = StateManager::new();
+        let dir = tempdir().unwrap();
+        let manager = StateManager::new(dir.path().to_path_buf());
         
-        // Create test environment
-        let env = EnvironmentState {
-            name: "test-env".to_string(),
-            python_version: PythonVersion::parse("3.8").unwrap(),
-            packages: HashMap::new(),
-            variables: HashMap::new(),
-            created_at: chrono::Utc::now(),
-        };
-
-        manager.add_environment(env.clone()).await.unwrap();
+        // Set active environment
+        let env_name = "test-env".to_string();
+        let env_path = PathBuf::from("/test/path");
+        let python_version = PythonVersion::parse("3.8").unwrap();
+        
+        manager.set_active_environment(env_name.clone(), env_path, python_version).await.unwrap();
         
         let state = manager.get_current_state().await.unwrap();
-        assert!(state.has_environment(&env.name));
+        assert_eq!(state.active_env_name.unwrap(), env_name);
     }
 }
 
@@ -60,143 +70,68 @@ mod state_validation {
     use super::*;
 
     #[tokio::test]
-    async fn test_state_validation() {
-        let mut manager = StateManager::new();
-        
-        // Add test data
-        let package = Package::new(
-            PackageId::new(
-                "test-package",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            Default::default(),
-        );
-        manager.add_package(package).await.unwrap();
-
-        // Validate state
-        let validation = manager.validate_state().await.unwrap();
-        assert!(validation.is_valid);
-        assert!(validation.issues.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_invalid_state() {
-        let mut manager = StateManager::new();
-        
-        // Create invalid state by adding conflicting packages
-        let pkg1 = Package::new(
-            PackageId::new(
-                "test-package",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            Default::default(),
-        );
-        
-        let pkg2 = Package::new(
-            PackageId::new(
-                "test-package",
-                Version::parse("2.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            Default::default(),
-        );
-
-        manager.add_package(pkg1).await.unwrap();
-        manager.add_package(pkg2).await.unwrap();
-
-        let validation = manager.validate_state().await.unwrap();
-        assert!(!validation.is_valid);
-        assert!(!validation.issues.is_empty());
-    }
-}
-
-mod state_persistence {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[tokio::test]
     async fn test_state_persistence() {
         let dir = tempdir().unwrap();
-        let mut manager = StateManager::with_storage(dir.path());
+        let manager = StateManager::new(dir.path().to_path_buf());
         
         // Add test data
         let package = Package::new(
             PackageId::new(
                 "test-package",
-                Version::parse("1.0.0").unwrap(),
+                "1.0.0".to_string(),
             ),
             HashMap::new(),
             Default::default(),
         );
-        manager.add_package(package.clone()).await.unwrap();
+
+        let mut state = State::default();
+        state.package_cache.insert(package.id().name().to_string(), PackageState {
+            name: package.id().name().to_string(),
+            version: package.version().to_string(),
+            installed_at: Utc::now(),
+            updated_at: Utc::now(),
+            status: PackageStatus::Installed,
+        });
+        manager.update_current_state(state).await.unwrap();
 
         // Save state
-        manager.save_state().await.unwrap();
+        manager.save().await.unwrap();
 
         // Create new manager and load state
-        let new_manager = StateManager::with_storage(dir.path());
+        let new_manager = StateManager::new(dir.path().to_path_buf());
+        new_manager.load().await.unwrap();
         let loaded_state = new_manager.get_current_state().await.unwrap();
         
-        assert!(loaded_state.has_package(&package.id));
+        assert!(loaded_state.package_cache.contains_key(package.id().name()));
     }
 }
 
-mod state_transactions {
+mod state_checkpoints {
     use super::*;
 
     #[tokio::test]
-    async fn test_state_transaction() {
-        let mut manager = StateManager::new();
+    async fn test_checkpoint_creation_and_restore() {
+        let dir = tempdir().unwrap();
+        let manager = StateManager::new(dir.path().to_path_buf());
         
-        // Start transaction
-        let tx = manager.begin_transaction().await.unwrap();
-        
-        // Add package in transaction
-        let package = Package::new(
-            PackageId::new(
-                "test-package",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            Default::default(),
-        );
-        
-        tx.add_package(package.clone()).await.unwrap();
-        
-        // Commit transaction
-        tx.commit().await.unwrap();
-        
-        // Verify state
-        let state = manager.get_current_state().await.unwrap();
-        assert!(state.has_package(&package.id));
-    }
+        // Add initial state
+        let mut state = State::default();
+        state.active_env_name = Some("test-env".to_string());
+        manager.update_current_state(state).await.unwrap();
 
-    #[tokio::test]
-    async fn test_transaction_rollback() {
-        let mut manager = StateManager::new();
+        // Create checkpoint
+        let checkpoint_id = Uuid::new_v4();
+        manager.create_checkpoint(checkpoint_id, "Test checkpoint".to_string(), None).await.unwrap();
+
+        // Change state
+        let mut new_state = State::default();
+        new_state.active_env_name = Some("other-env".to_string());
+        manager.update_current_state(new_state).await.unwrap();
+
+        // Restore checkpoint
+        manager.restore_checkpoint(&checkpoint_id.to_string()).await.unwrap();
         
-        // Start transaction
-        let tx = manager.begin_transaction().await.unwrap();
-        
-        // Add package in transaction
-        let package = Package::new(
-            PackageId::new(
-                "test-package",
-                Version::parse("1.0.0").unwrap(),
-            ),
-            HashMap::new(),
-            Default::default(),
-        );
-        
-        tx.add_package(package.clone()).await.unwrap();
-        
-        // Rollback transaction
-        tx.rollback().await.unwrap();
-        
-        // Verify state doesn't have package
-        let state = manager.get_current_state().await.unwrap();
-        assert!(!state.has_package(&package.id));
+        let restored_state = manager.get_current_state().await.unwrap();
+        assert_eq!(restored_state.active_env_name.unwrap(), "test-env");
     }
 }

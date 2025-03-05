@@ -1,14 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use chrono::Duration;
 use tempfile::tempdir;
 use blast_core::{
-    package::{Package, PackageId, Version, VersionConstraint},
+    package::Package,
     python::PythonVersion,
-    state::EnvironmentState,
 };
+use blast_image::chrono;
 use blast_daemon::{
-    state_manager::StateManager,
+    state::StateManager,
     metrics::MetricsManager,
 };
 
