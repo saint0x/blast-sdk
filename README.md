@@ -1,6 +1,6 @@
 # Blast - Intelligent Python Environment Manager
 
-Blast is a powerful Python environment manager that seamlessly orchestrates dependencies and state, inside an isolated sanboxed enviroment.
+Blast is a powerful Python environment manager that seamlessly orchestrates dependencies and state, inside an isolated sanboxed enviroment. Think if venv and Docker had a baby that magically synchronized your python dependencies.
 
 ## Quick Start
 
@@ -39,6 +39,12 @@ Your prompt will change to `(blast)`, indicating that you're now working in the 
 - **Health Monitoring**: Real-time health status checks
 - **Resource Limits**: Basic resource usage monitoring
 - **State Synchronization**: Environment state coordination
+
+### 📸 Image Management
+- **Environment Snapshots**: Save complete environment state as images
+- **Quick Restore**: Resume work from saved environment states
+- **State Portability**: Share and version environment configurations
+- **Metadata Tracking**: Track environment configurations and dependencies
 
 ### 🛠 Developer Experience
 - **Multi-shell Support**: Works with `bash`, `zsh`, `fish`, and `powershell`
